@@ -1,65 +1,127 @@
-import Image from "next/image";
+'use client';
 
-export default function Home() {
+import { useState, useCallback, useMemo } from 'react';
+import { BookOpen } from 'lucide-react';
+import type { Book } from '@/types/book';
+import { seedCatalog, categoryMap } from '@/lib/gutenberg/seed-catalog';
+import { searchBooks } from '@/lib/gutenberg/client';
+import { SearchBar } from '@/components/library/SearchBar';
+import { CategoryNav } from '@/components/library/CategoryNav';
+import { BookGrid } from '@/components/library/BookGrid';
+import { BookDetail } from '@/components/library/BookDetail';
+
+const ALL_CATEGORIES = ['All', ...Object.keys(categoryMap)];
+
+// Build a quick lookup map from the seed catalog for O(1) access
+const seedMap = new Map(seedCatalog.map((b) => [b.id, b]));
+
+export default function LibraryHome() {
+  const [activeCategory, setActiveCategory] = useState('All');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<Book[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [selectedBook, setSelectedBook] = useState<Book | null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
+
+  // Get books for the active category from seed catalog (instant, no network)
+  const categoryBooks = useMemo(() => {
+    if (activeCategory === 'All') return seedCatalog;
+    const ids = categoryMap[activeCategory];
+    if (!ids) return [];
+    return ids
+      .map((id) => seedMap.get(id))
+      .filter((b): b is Book => b !== undefined);
+  }, [activeCategory]);
+
+  // Handle search
+  const handleSearch = useCallback(async (query: string) => {
+    setSearchQuery(query);
+
+    if (!query) {
+      setSearchResults([]);
+      setIsSearching(false);
+      return;
+    }
+
+    setIsSearching(true);
+    try {
+      const { books } = await searchBooks(query);
+      setSearchResults(books);
+    } catch {
+      setSearchResults([]);
+    } finally {
+      setIsSearching(false);
+    }
+  }, []);
+
+  // Handle book selection
+  function handleSelectBook(book: Book) {
+    setSelectedBook(book);
+    setDetailOpen(true);
+  }
+
+  function handleCloseDetail() {
+    setDetailOpen(false);
+  }
+
+  // Are we in search mode?
+  const isSearchMode = searchQuery.length > 0;
+
+  // Choose which books to display
+  const displayedBooks = isSearchMode ? searchResults : categoryBooks;
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+    <div className="flex flex-col min-h-dvh bg-background">
+      {/* Header */}
+      <header className="sticky top-0 z-40 bg-background/95 backdrop-blur-sm border-b border-border">
+        <div className="max-w-6xl mx-auto px-4 pt-4 pb-3">
+          {/* App title */}
+          <div className="flex items-center gap-2 mb-3">
+            <BookOpen className="size-5 text-foreground" />
+            <h1 className="text-lg font-semibold tracking-tight text-foreground">
+              AI Book Companion
+            </h1>
+          </div>
+
+          {/* Search */}
+          <SearchBar onSearch={handleSearch} isSearching={isSearching} />
+
+          {/* Categories — only show when not searching */}
+          {!isSearchMode && (
+            <div className="mt-2 -mb-1">
+              <CategoryNav
+                categories={ALL_CATEGORIES}
+                activeCategory={activeCategory}
+                onSelect={setActiveCategory}
+              />
+            </div>
+          )}
+        </div>
+      </header>
+
+      {/* Main content */}
+      <main className="flex-1 max-w-6xl mx-auto w-full py-4">
+        {/* Search mode feedback */}
+        {isSearchMode && !isSearching && searchResults.length > 0 && (
+          <p className="px-4 pb-3 text-xs text-muted-foreground">
+            {searchResults.length} result{searchResults.length !== 1 ? 's' : ''}{' '}
+            for &ldquo;{searchQuery}&rdquo;
           </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
+        )}
+
+        <BookGrid
+          books={displayedBooks}
+          isLoading={isSearching}
+          onSelectBook={handleSelectBook}
+        />
       </main>
+
+      {/* Book detail overlay */}
+      <BookDetail
+        book={selectedBook}
+        open={detailOpen}
+        onClose={handleCloseDetail}
+      />
     </div>
   );
 }
