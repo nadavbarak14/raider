@@ -16,8 +16,14 @@ import { ReaderControls } from '@/components/reader/ReaderControls';
 import { ProgressBar } from '@/components/reader/ProgressBar';
 import { TableOfContents } from '@/components/reader/TableOfContents';
 import { Bookmarks } from '@/components/reader/Bookmarks';
+import { HighlightMenu } from '@/components/ai/HighlightMenu';
+import { ThreadPanel } from '@/components/ai/ThreadPanel';
+import { MarginMarkers } from '@/components/ai/MarginMarkers';
+import { GeneralChat } from '@/components/ai/GeneralChat';
 import type { Book, ReadingProgress } from '@/types/book';
 import type { ReaderSettings } from '@/types/settings';
+import type { QuestionType } from '@/types/thread';
+import type { Thread } from '@/types/thread';
 import { DEFAULT_READER_SETTINGS } from '@/types/settings';
 import {
   getBook as getStoredBook,
@@ -26,6 +32,7 @@ import {
 import { getBook as fetchBookMeta } from '@/lib/gutenberg/client';
 import { getProgress, saveProgress } from '@/lib/storage/progress';
 import { getSettings, updateReaderSettings } from '@/lib/storage/settings';
+import { getThreadsForBook } from '@/lib/storage/threads';
 import { isLocationBookmarked, toggleBookmark } from '@/lib/reader/bookmarks';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -65,6 +72,19 @@ export default function ReaderPage({
   const [tocOpen, setTocOpen] = useState(false);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
   const [isBookmarked, setIsBookmarked] = useState(false);
+
+  // AI interaction state
+  const [highlightMenuVisible, setHighlightMenuVisible] = useState(false);
+  const [highlightMenuPosition, setHighlightMenuPosition] = useState({ x: 0, y: 0 });
+  const [selectedText, setSelectedText] = useState('');
+  const [selectedCfi, setSelectedCfi] = useState('');
+  const [threadPanelOpen, setThreadPanelOpen] = useState(false);
+  const [threadSessionKey, setThreadSessionKey] = useState(0);
+  const [activeQuestionType, setActiveQuestionType] = useState<QuestionType>('ask_ai');
+  const [activeAnchorText, setActiveAnchorText] = useState<string | undefined>(undefined);
+  const [activeAnchorCfi, setActiveAnchorCfi] = useState<string | undefined>(undefined);
+  const [activeThreadId, setActiveThreadId] = useState<string | undefined>(undefined);
+  const [bookThreads, setBookThreads] = useState<Thread[]>([]);
 
   // TOC entries
   const [tocEntries, setTocEntries] = useState<TocEntry[]>([]);
@@ -119,6 +139,12 @@ export default function ReaderPage({
         setTotalChapters(progress.totalChapters);
       }
 
+      // Load existing AI threads for this book
+      const threads = await getThreadsForBook(bookId);
+      if (!cancelled) {
+        setBookThreads(threads);
+      }
+
       if (!cancelled) {
         setPageReady(true);
       }
@@ -142,7 +168,7 @@ export default function ReaderPage({
   }, []);
 
   useEffect(() => {
-    if (chromeVisible && ready && !settingsOpen && !tocOpen && !bookmarksOpen) {
+    if (chromeVisible && ready && !settingsOpen && !tocOpen && !bookmarksOpen && !threadPanelOpen) {
       scheduleChromeHide();
     }
     return () => {
@@ -150,7 +176,7 @@ export default function ReaderPage({
         clearTimeout(chromeTimerRef.current);
       }
     };
-  }, [chromeVisible, ready, settingsOpen, tocOpen, bookmarksOpen, scheduleChromeHide]);
+  }, [chromeVisible, ready, settingsOpen, tocOpen, bookmarksOpen, threadPanelOpen, scheduleChromeHide]);
 
   // ── Callbacks ─────────────────────────────────────────────────────────────
 
@@ -206,15 +232,56 @@ export default function ReaderPage({
   );
 
   const handleTextSelected = useCallback(
-    (cfi: string, selectedText: string, rect: DOMRect) => {
-      // Placeholder for AI features in a later task
-      // Will open an AI interaction panel with the selected text
-      void cfi;
-      void selectedText;
-      void rect;
+    (cfi: string, text: string, rect: DOMRect) => {
+      if (!text.trim()) return;
+      setSelectedText(text.trim());
+      setSelectedCfi(cfi);
+      // Position the menu at the top-center of the selection
+      setHighlightMenuPosition({
+        x: rect.left + rect.width / 2,
+        y: rect.top,
+      });
+      setHighlightMenuVisible(true);
     },
     []
   );
+
+  const handleHighlightAction = useCallback(
+    (type: QuestionType) => {
+      setHighlightMenuVisible(false);
+      setActiveQuestionType(type);
+      setActiveAnchorText(selectedText);
+      setActiveAnchorCfi(selectedCfi);
+      setActiveThreadId(undefined);
+      setThreadSessionKey((k) => k + 1);
+      setThreadPanelOpen(true);
+    },
+    [selectedText, selectedCfi]
+  );
+
+  const handleCloseThreadPanel = useCallback(() => {
+    setThreadPanelOpen(false);
+    // Refresh threads list when closing panel (new thread may have been created)
+    getThreadsForBook(bookId).then(setBookThreads);
+  }, [bookId]);
+
+  const handleOpenGeneralChat = useCallback(() => {
+    setActiveQuestionType('general');
+    setActiveAnchorText(undefined);
+    setActiveAnchorCfi(undefined);
+    setActiveThreadId(undefined);
+    setThreadSessionKey((k) => k + 1);
+    setThreadPanelOpen(true);
+  }, []);
+
+  const handleOpenThread = useCallback((thread: Thread) => {
+    setActiveQuestionType(thread.isGeneral ? 'general' : 'ask_ai');
+    setActiveAnchorText(thread.anchorText ?? undefined);
+    setActiveAnchorCfi(thread.anchorCfi ?? undefined);
+    setActiveThreadId(thread.id);
+    setThreadSessionKey((k) => k + 1);
+    setThreadPanelOpen(true);
+  }, []);
 
   const handleSettingsChange = useCallback(
     async (newSettings: ReaderSettings) => {
@@ -245,11 +312,11 @@ export default function ReaderPage({
   }, [bookId, currentCfi, currentChapter]);
 
   const handleCenterTap = useCallback(() => {
-    // Only toggle when no sheets are open
-    if (!settingsOpen && !tocOpen && !bookmarksOpen) {
+    // Only toggle when no sheets or panels are open
+    if (!settingsOpen && !tocOpen && !bookmarksOpen && !threadPanelOpen && !highlightMenuVisible) {
       setChromeVisible((prev) => !prev);
     }
-  }, [settingsOpen, tocOpen, bookmarksOpen]);
+  }, [settingsOpen, tocOpen, bookmarksOpen, threadPanelOpen, highlightMenuVisible]);
 
   // ── Guard: if page data isn't ready, show a loader ────────────────────────
 
@@ -462,6 +529,49 @@ export default function ReaderPage({
         >
           <BookmarkIcon className="size-4" />
         </button>
+      )}
+
+      {/* ── AI Components ──────────────────────────────────────────────── */}
+
+      {/* Highlight menu — appears on text selection */}
+      <HighlightMenu
+        position={highlightMenuPosition}
+        selectedText={selectedText}
+        selectedCfi={selectedCfi}
+        onAction={handleHighlightAction}
+        onClose={() => setHighlightMenuVisible(false)}
+        visible={highlightMenuVisible}
+      />
+
+      {/* Thread panel — conversation view (key forces remount on each session) */}
+      {threadPanelOpen && (
+        <ThreadPanel
+          key={threadSessionKey}
+          bookId={bookId}
+          currentChapterIndex={currentChapter}
+          anchorCfi={activeAnchorCfi}
+          anchorText={activeAnchorText}
+          questionType={activeQuestionType}
+          threadId={activeThreadId}
+          open={threadPanelOpen}
+          onClose={handleCloseThreadPanel}
+        />
+      )}
+
+      {/* Margin markers — thread count badge */}
+      <MarginMarkers
+        threads={bookThreads}
+        onOpenThread={handleOpenThread}
+        visible={chromeVisible && !threadPanelOpen}
+      />
+
+      {/* General chat FAB */}
+      {chromeVisible && !threadPanelOpen && (
+        <GeneralChat
+          bookId={bookId}
+          currentChapterIndex={currentChapter}
+          onOpen={handleOpenGeneralChat}
+        />
       )}
     </div>
   );
