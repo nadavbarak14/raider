@@ -68,8 +68,8 @@ export function HighlightMenu({
   const menuHeight = 52;
   const padding = 8;
 
-  const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 400;
-  const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 800;
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
 
   let left = position.x - menuWidth / 2;
   let top = position.y - menuHeight - 12; // 12px gap above selection

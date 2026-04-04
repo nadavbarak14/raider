@@ -439,19 +439,6 @@ export default function ReaderPage({
         </Button>
       </header>
 
-      {/* ── Center tap zone (for toggling chrome) ─────────────────────────── */}
-      <div
-        className="absolute inset-0 z-10 pointer-events-none"
-        style={{ top: '48px', bottom: '52px' }}
-      >
-        <div
-          className="absolute inset-0 pointer-events-auto"
-          style={{ left: '30%', right: '30%' }}
-          onClick={handleCenterTap}
-          aria-hidden="true"
-        />
-      </div>
-
       {/* ── EPUB Reader ───────────────────────────────────────────────────── */}
       <main className="flex-1 min-h-0">
         <EpubReader
@@ -461,6 +448,7 @@ export default function ReaderPage({
           onLocationChanged={handleLocationChanged}
           onTextSelected={handleTextSelected}
           onReady={handleReady}
+          onCenterTap={handleCenterTap}
           renditionRef={renditionRef}
         />
       </main>

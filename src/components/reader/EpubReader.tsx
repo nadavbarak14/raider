@@ -61,6 +61,8 @@ interface EpubReaderProps {
   onLocationChanged?: (cfi: string, chapterIndex: number, percent: number) => void;
   onTextSelected?: (cfi: string, selectedText: string, rect: DOMRect) => void;
   onReady?: (totalChapters: number) => void;
+  /** Called when user taps the middle 40% of the reader (toggle chrome) */
+  onCenterTap?: () => void;
   /** Ref exposed so the parent page can call .next() / .prev() / .display() */
   renditionRef?: RefObject<EpubRendition | null>;
 }
@@ -72,6 +74,7 @@ export function EpubReader({
   onLocationChanged,
   onTextSelected,
   onReady,
+  onCenterTap,
   renditionRef,
 }: EpubReaderProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -87,6 +90,8 @@ export function EpubReader({
   onTextSelectedRef.current = onTextSelected;
   const onReadyRef = useRef(onReady);
   onReadyRef.current = onReady;
+  const onCenterTapRef = useRef(onCenterTap);
+  onCenterTapRef.current = onCenterTap;
 
   // ── Initialize EPUB ──────────────────────────────────────────────────────
 
@@ -94,6 +99,7 @@ export function EpubReader({
     let cancelled = false;
     let rendition: EpubRendition | null = null;
     let book: EpubBook | null = null;
+    let deferTimer: ReturnType<typeof setTimeout> | null = null;
 
     async function init() {
       if (!containerRef.current) return;
@@ -102,50 +108,48 @@ export function EpubReader({
         setLoading(true);
         setError(null);
 
-        // 1. Dynamically import epubjs (browser-only)
-        const ePub = (await import('epubjs')).default;
+        // 1. Parallelize: import epubjs + resolve EPUB blob simultaneously
+        const blobPromise = (async () => {
+          let blob = await getBookBlob(bookId);
+          if (!blob) {
+            let meta = await getStoredBook(bookId);
+            if (!meta) meta = (await fetchBookMeta(bookId)) ?? undefined;
+            if (!meta?.downloadUrl) return null;
 
-        // 2. Load the EPUB data — prefer cached blob, otherwise fetch
-        let blob = await getBookBlob(bookId);
+            const response = await fetch(`/api/epub/${bookId}`);
+            if (!response.ok) return null;
 
-        if (!blob) {
-          // Get book metadata to find download URL
-          let meta = await getStoredBook(bookId);
-          if (!meta) {
-            meta = (await fetchBookMeta(bookId)) ?? undefined;
+            blob = await response.blob();
+            await saveBookBlob(bookId, blob);
           }
-          if (!meta?.downloadUrl) {
-            setError('Could not find EPUB download URL.');
-            setLoading(false);
-            return;
-          }
+          return blob;
+        })();
 
-          // Fetch the EPUB file via our proxy (avoids CORS issues with Gutenberg)
-          const response = await fetch(`/api/epub/${bookId}`);
-          if (!response.ok) {
-            setError('Failed to download the book. Please try again.');
-            setLoading(false);
-            return;
-          }
-          blob = await response.blob();
-
-          // Cache the blob for offline use
-          await saveBookBlob(bookId, blob);
-        }
+        const [ePubModule, blob] = await Promise.all([
+          import('epubjs'),
+          blobPromise,
+        ]);
 
         if (cancelled) return;
 
-        // 3. Create epubjs Book from ArrayBuffer
+        if (!blob) {
+          setError('Failed to load the book. Please try again.');
+          setLoading(false);
+          return;
+        }
+
+        const ePub = ePubModule.default;
+
+        // 2. Create epubjs Book from ArrayBuffer
         const arrayBuffer = await blob.arrayBuffer();
         book = ePub(arrayBuffer);
         bookRef.current = book;
 
-        // Wait for the book to be ready
         await book.ready;
 
         if (cancelled) return;
 
-        // 4. Create rendition
+        // 3. Create rendition
         rendition = book.renderTo(containerRef.current, {
           width: '100%',
           height: '100%',
@@ -159,34 +163,34 @@ export function EpubReader({
           (renditionRef as React.MutableRefObject<EpubRendition | null>).current = rendition;
         }
 
-        // 5. Display at initial position or start
-        if (initialCfi) {
-          await rendition.display(initialCfi);
-        } else {
-          await rendition.display();
+        // 4. Determine display target BEFORE rendering — avoids double display()
+        let displayTarget: string | undefined = initialCfi;
 
-          // Skip Gutenberg boilerplate for fresh reads by navigating to the
-          // first TOC entry that looks like actual content (not cover/copyright/etc.)
+        if (!displayTarget) {
           try {
             const nav = await book.loaded.navigation;
             if (nav?.toc?.length > 0) {
               const skipLabels = ['cover', 'title', 'copyright', 'contents', 'table of contents'];
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
               const firstChapter = nav.toc.find((t: any) => {
                 const label = t.label?.toLowerCase().trim() || '';
                 return !skipLabels.some((skip) => label.includes(skip));
               });
               if (firstChapter?.href) {
-                await rendition.display(firstChapter.href);
+                displayTarget = firstChapter.href;
               }
             }
           } catch {
-            // Non-fatal: if navigation fails, stay on the default first page
+            // Non-fatal: fall through to default display
           }
         }
 
+        // 5. Single display() call with the resolved target
+        await rendition.display(displayTarget);
+
         if (cancelled) return;
 
-        // 6. Set up event listeners (before location generation so reading starts immediately)
+        // 6. Set up event listeners
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         rendition.on('relocated', (location: any) => {
           if (!location?.start) return;
@@ -213,32 +217,98 @@ export function EpubReader({
           }
         });
 
-        // 7. Generate locations in background (don't block reading)
-        book.locations.generate(1024).catch(() => {
-          // Location generation failure is non-fatal
+        // 7. Register touch/click handlers inside epub iframe content
+        //    Events inside the iframe don't bubble to React, so we must
+        //    attach listeners directly to each content document.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        rendition.hooks.content.register((contents: any) => {
+          const doc: Document = contents.document;
+          let touchStart: { x: number; y: number; time: number } | null = null;
+          let touchHandled = false;
+
+          doc.addEventListener('touchstart', (e: TouchEvent) => {
+            if (e.touches.length !== 1) return;
+            touchHandled = false;
+            touchStart = {
+              x: e.touches[0].clientX,
+              y: e.touches[0].clientY,
+              time: Date.now(),
+            };
+          }, { passive: true });
+
+          doc.addEventListener('touchend', (e: TouchEvent) => {
+            const start = touchStart;
+            if (!start) return;
+            touchStart = null;
+            touchHandled = true;
+
+            if (e.changedTouches.length === 0) return;
+            const endX = e.changedTouches[0].clientX;
+            const endY = e.changedTouches[0].clientY;
+            const deltaX = endX - start.x;
+            const deltaY = endY - start.y;
+            const elapsed = Date.now() - start.time;
+
+            // Swipe detection (relaxed thresholds for mobile)
+            if (elapsed < 600 && Math.abs(deltaX) > Math.abs(deltaY) && Math.abs(deltaX) > 40) {
+              if (deltaX < 0) rendition.next();
+              else rendition.prev();
+              return;
+            }
+
+            // Tap detection (minimal finger movement)
+            if (Math.abs(deltaX) < 10 && Math.abs(deltaY) < 10) {
+              const sel = doc.getSelection?.();
+              if (sel && sel.toString().trim()) return;
+
+              const width = doc.documentElement.clientWidth;
+              const relX = endX / width;
+              if (relX < 0.3) rendition.prev();
+              else if (relX > 0.7) rendition.next();
+              else onCenterTapRef.current?.();
+            }
+          }, { passive: true });
+
+          // Desktop: click handler (skipped when touch already handled)
+          doc.addEventListener('click', (e: MouseEvent) => {
+            if (touchHandled) {
+              touchHandled = false;
+              return;
+            }
+            const sel = doc.getSelection?.();
+            if (sel && sel.toString().trim()) return;
+
+            const width = doc.documentElement.clientWidth;
+            const relX = e.clientX / width;
+            if (relX < 0.3) rendition.prev();
+            else if (relX > 0.7) rendition.next();
+            else onCenterTapRef.current?.();
+          });
         });
 
-        // 8. Extract chapters if not already stored
-        const existingChapters = await getChapters(bookId);
-        if (existingChapters.length === 0) {
-          // Do this in background, don't block reading
-          import('@/lib/gutenberg/parser').then(async ({ extractChaptersFromEpub }) => {
-            try {
-              const chapters = await extractChaptersFromEpub(book, bookId);
-              if (chapters.length > 0) {
-                await saveChapters(bookId, chapters);
-              }
-            } catch {
-              // Non-fatal: chapter extraction failure doesn't block reading
-            }
-          });
-        }
-
-        // 10. Report ready
+        // 8. Report ready + hide loading before background work
         const totalChapters = book.spine?.items?.length ?? 0;
         onReadyRef.current?.(totalChapters);
-
         setLoading(false);
+
+        // 8. Defer location generation so it doesn't compete with initial render
+        deferTimer = setTimeout(() => {
+          book?.locations.generate(1024).catch(() => {});
+        }, 1500);
+
+        // 9. Extract chapters in background if not already stored
+        getChapters(bookId).then((existing) => {
+          if (existing.length === 0) {
+            import('@/lib/gutenberg/parser').then(async ({ extractChaptersFromEpub }) => {
+              try {
+                const chapters = await extractChaptersFromEpub(book, bookId);
+                if (chapters.length > 0) await saveChapters(bookId, chapters);
+              } catch {
+                // Non-fatal
+              }
+            });
+          }
+        });
       } catch (err) {
         if (!cancelled) {
           console.error('EpubReader init error:', err);
@@ -252,6 +322,7 @@ export function EpubReader({
 
     return () => {
       cancelled = true;
+      if (deferTimer != null) clearTimeout(deferTimer);
       if (rendition) {
         try {
           rendition.destroy();
@@ -308,41 +379,6 @@ export function EpubReader({
     }
   }, [settings]);
 
-  // ── Touch/click navigation ───────────────────────────────────────────────
-
-  const handleTap = useCallback(
-    (e: React.MouseEvent | React.TouchEvent) => {
-      const rendition = internalRenditionRef.current;
-      if (!rendition) return;
-
-      const container = containerRef.current;
-      if (!container) return;
-
-      // Get the x-coordinate of the tap
-      let clientX: number;
-      if ('touches' in e) {
-        if (e.touches.length > 0) {
-          clientX = e.touches[0].clientX;
-        } else {
-          return;
-        }
-      } else {
-        clientX = e.clientX;
-      }
-
-      const rect = container.getBoundingClientRect();
-      const relativeX = (clientX - rect.left) / rect.width;
-
-      if (relativeX < 0.3) {
-        rendition.prev();
-      } else if (relativeX > 0.7) {
-        rendition.next();
-      }
-      // Middle 40% does nothing (toggles UI, handled by parent)
-    },
-    []
-  );
-
   // ── Keyboard navigation ──────────────────────────────────────────────────
 
   useEffect(() => {
@@ -357,47 +393,6 @@ export function EpubReader({
     }
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, []);
-
-  // ── Swipe gesture support ────────────────────────────────────────────────
-
-  const touchStartRef = useRef<{ x: number; y: number; time: number } | null>(null);
-
-  const handleTouchStart = useCallback((e: React.TouchEvent) => {
-    if (e.touches.length !== 1) return;
-    touchStartRef.current = {
-      x: e.touches[0].clientX,
-      y: e.touches[0].clientY,
-      time: Date.now(),
-    };
-  }, []);
-
-  const handleTouchEnd = useCallback((e: React.TouchEvent) => {
-    const start = touchStartRef.current;
-    if (!start) return;
-    touchStartRef.current = null;
-
-    const rendition = internalRenditionRef.current;
-    if (!rendition) return;
-
-    if (e.changedTouches.length === 0) return;
-    const endX = e.changedTouches[0].clientX;
-    const endY = e.changedTouches[0].clientY;
-    const deltaX = endX - start.x;
-    const deltaY = endY - start.y;
-    const elapsed = Date.now() - start.time;
-
-    // Must be a quick horizontal swipe (not a vertical scroll)
-    const MIN_SWIPE = 50;
-    const MAX_TIME = 500;
-    if (elapsed > MAX_TIME) return;
-    if (Math.abs(deltaY) > Math.abs(deltaX)) return;
-
-    if (deltaX < -MIN_SWIPE) {
-      rendition.next();
-    } else if (deltaX > MIN_SWIPE) {
-      rendition.prev();
-    }
   }, []);
 
   // ── Render ───────────────────────────────────────────────────────────────
@@ -466,10 +461,6 @@ export function EpubReader({
       <div
         ref={containerRef}
         className="w-full h-full"
-        onClick={handleTap}
-        onTouchStart={handleTouchStart}
-        onTouchEnd={handleTouchEnd}
-        style={{ touchAction: 'pan-y' }}
       />
     </div>
   );
