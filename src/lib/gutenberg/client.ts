@@ -1,7 +1,7 @@
 import { db } from '@/lib/storage/db';
 import type { Book } from '@/types/book';
 
-const BASE_URL = 'https://gutendex.com';
+const BASE_URL = '/api/gutenberg';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 // ── Gutendex response shapes ─────────────────────────────────────────────────
@@ -102,7 +102,7 @@ async function fetchGutendex<T>(path: string, cacheKey: string): Promise<T | nul
   if (cached) return cached as T;
 
   try {
-    const res = await fetch(`${BASE_URL}${path}`, {
+    const res = await fetch(`${BASE_URL}?path=${encodeURIComponent(path)}`, {
       headers: { Accept: 'application/json' },
     });
     if (!res.ok) return null;

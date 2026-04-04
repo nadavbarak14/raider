@@ -120,8 +120,8 @@ export function EpubReader({
             return;
           }
 
-          // Fetch the EPUB file
-          const response = await fetch(meta.downloadUrl);
+          // Fetch the EPUB file via our proxy (avoids CORS issues with Gutenberg)
+          const response = await fetch(`/api/epub/${bookId}`);
           if (!response.ok) {
             setError('Failed to download the book. Please try again.');
             setLoading(false);
@@ -164,16 +164,29 @@ export function EpubReader({
           await rendition.display(initialCfi);
         } else {
           await rendition.display();
+
+          // Skip Gutenberg boilerplate for fresh reads by navigating to the
+          // first TOC entry that looks like actual content (not cover/copyright/etc.)
+          try {
+            const nav = await book.loaded.navigation;
+            if (nav?.toc?.length > 0) {
+              const skipLabels = ['cover', 'title', 'copyright', 'contents', 'table of contents'];
+              const firstChapter = nav.toc.find((t: any) => {
+                const label = t.label?.toLowerCase().trim() || '';
+                return !skipLabels.some((skip) => label.includes(skip));
+              });
+              if (firstChapter?.href) {
+                await rendition.display(firstChapter.href);
+              }
+            }
+          } catch {
+            // Non-fatal: if navigation fails, stay on the default first page
+          }
         }
 
         if (cancelled) return;
 
-        // 6. Generate locations for percentage tracking
-        await book.locations.generate(1024);
-
-        if (cancelled) return;
-
-        // 7. Set up event listeners
+        // 6. Set up event listeners (before location generation so reading starts immediately)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         rendition.on('relocated', (location: any) => {
           if (!location?.start) return;
@@ -200,6 +213,11 @@ export function EpubReader({
           }
         });
 
+        // 7. Generate locations in background (don't block reading)
+        book.locations.generate(1024).catch(() => {
+          // Location generation failure is non-fatal
+        });
+
         // 8. Extract chapters if not already stored
         const existingChapters = await getChapters(bookId);
         if (existingChapters.length === 0) {
@@ -216,7 +234,7 @@ export function EpubReader({
           });
         }
 
-        // 9. Report ready
+        // 10. Report ready
         const totalChapters = book.spine?.items?.length ?? 0;
         onReadyRef.current?.(totalChapters);
 
