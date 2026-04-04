@@ -44,6 +44,7 @@ export function BookCard({ book, onSelect }: BookCardProps) {
   return (
     <button
       onClick={() => onSelect(book)}
+      aria-label={`${book.title} by ${book.author}`}
       className={cn(
         'group flex flex-col text-left rounded-lg overflow-hidden',
         'transition-transform active:scale-[0.97]',

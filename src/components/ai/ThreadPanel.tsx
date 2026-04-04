@@ -245,10 +245,24 @@ export function ThreadPanel({
     [inputValue, isStreaming, sendMessage]
   );
 
+  // ── Escape key to close ──────────────────────────────────────────────────
+
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
   // ── Render ───────────────────────────────────────────────────────────────
 
   return (
     <div
+      role="dialog"
+      aria-label="AI conversation panel"
       className={cn(
         'fixed inset-x-0 bottom-0 z-50',
         'flex flex-col',
@@ -320,6 +334,7 @@ export function ThreadPanel({
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
           placeholder="Ask a follow-up..."
+          aria-label="Type a follow-up question"
           disabled={isStreaming}
           className={cn(
             'flex-1 min-w-0 h-10 px-3 rounded-lg',

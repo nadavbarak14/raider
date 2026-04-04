@@ -47,7 +47,7 @@ export function SearchBar({ onSearch, isSearching }: SearchBarProps) {
   }
 
   return (
-    <div className="relative">
+    <div className="relative" role="search" aria-label="Search books">
       <Search
         className={cn(
           'absolute left-3 top-1/2 -translate-y-1/2 size-4',
@@ -56,10 +56,11 @@ export function SearchBar({ onSearch, isSearching }: SearchBarProps) {
       />
       <input
         ref={inputRef}
-        type="text"
+        type="search"
         value={value}
         onChange={handleChange}
         placeholder="Search books, authors..."
+        aria-label="Search books and authors"
         className={cn(
           'h-11 w-full rounded-xl border border-input bg-background pl-10 pr-10',
           'text-sm placeholder:text-muted-foreground',

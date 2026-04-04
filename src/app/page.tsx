@@ -100,7 +100,7 @@ export default function LibraryHome() {
       </header>
 
       {/* Main content */}
-      <main className="flex-1 max-w-6xl mx-auto w-full py-4">
+      <main className="flex-1 max-w-6xl mx-auto w-full py-4" aria-label="Book library">
         {/* Search mode feedback */}
         {isSearchMode && !isSearching && searchResults.length > 0 && (
           <p className="px-4 pb-3 text-xs text-muted-foreground">

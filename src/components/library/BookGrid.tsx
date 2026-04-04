@@ -26,6 +26,8 @@ export function BookGrid({ books, isLoading, onSelectBook }: BookGridProps) {
   if (isLoading) {
     return (
       <div
+        role="status"
+        aria-label="Loading books"
         className={cn(
           'grid gap-4 px-4',
           'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6'
@@ -34,6 +36,7 @@ export function BookGrid({ books, isLoading, onSelectBook }: BookGridProps) {
         {Array.from({ length: 8 }).map((_, i) => (
           <SkeletonCard key={i} />
         ))}
+        <span className="sr-only">Loading books...</span>
       </div>
     );
   }
@@ -66,13 +69,17 @@ export function BookGrid({ books, isLoading, onSelectBook }: BookGridProps) {
 
   return (
     <div
+      role="list"
+      aria-label="Book catalog"
       className={cn(
         'grid gap-4 px-4',
         'grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6'
       )}
     >
       {books.map((book) => (
-        <BookCard key={book.id} book={book} onSelect={onSelectBook} />
+        <div key={book.id} role="listitem">
+          <BookCard book={book} onSelect={onSelectBook} />
+        </div>
       ))}
     </div>
   );
