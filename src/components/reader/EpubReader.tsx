@@ -197,35 +197,7 @@ export function EpubReader({
           };
         }
 
-        // 4. Determine display target BEFORE rendering — avoids double display()
-        // Prefer last known CFI (e.g. when switching flow modes) over initialCfi
-        let displayTarget: string | undefined = lastCfiRef.current || initialCfi;
-
-        if (!displayTarget) {
-          try {
-            const nav = await book.loaded.navigation;
-            if (nav?.toc?.length > 0) {
-              const skipLabels = ['cover', 'title', 'copyright', 'contents', 'table of contents'];
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              const firstChapter = nav.toc.find((t: any) => {
-                const label = t.label?.toLowerCase().trim() || '';
-                return !skipLabels.some((skip) => label.includes(skip));
-              });
-              if (firstChapter?.href) {
-                displayTarget = firstChapter.href;
-              }
-            }
-          } catch {
-            // Non-fatal: fall through to default display
-          }
-        }
-
-        // 5. Single display() call with the resolved target
-        await rendition.display(displayTarget);
-
-        if (cancelled) return;
-
-        // 6. Set up event listeners
+        // 4. Set up event listeners BEFORE display() so they capture initial content
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         rendition.on('relocated', (location: any) => {
           if (!location?.start) return;
@@ -254,7 +226,8 @@ export function EpubReader({
           }
         });
 
-        // 7. Register touch/click handlers inside epub iframe content
+        // 5. Register touch/click handlers inside epub iframe content
+        //    MUST be registered BEFORE display() so the initial content gets handlers.
         //    Events inside the iframe don't bubble to React, so we must
         //    attach listeners directly to each content document.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -333,17 +306,45 @@ export function EpubReader({
           });
         });
 
+        // 6. Determine display target — avoids double display()
+        // Prefer last known CFI (e.g. when switching flow modes) over initialCfi
+        let displayTarget: string | undefined = lastCfiRef.current || initialCfi;
+
+        if (!displayTarget) {
+          try {
+            const nav = await book.loaded.navigation;
+            if (nav?.toc?.length > 0) {
+              const skipLabels = ['cover', 'title', 'copyright', 'contents', 'table of contents'];
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              const firstChapter = nav.toc.find((t: any) => {
+                const label = t.label?.toLowerCase().trim() || '';
+                return !skipLabels.some((skip) => label.includes(skip));
+              });
+              if (firstChapter?.href) {
+                displayTarget = firstChapter.href;
+              }
+            }
+          } catch {
+            // Non-fatal: fall through to default display
+          }
+        }
+
+        // 7. Single display() call with the resolved target
+        await rendition.display(displayTarget);
+
+        if (cancelled) return;
+
         // 8. Report ready + hide loading before background work
         const totalChapters = book.spine?.items?.length ?? 0;
         onReadyRef.current?.(totalChapters);
         setLoading(false);
 
-        // 8. Defer location generation so it doesn't compete with initial render
+        // 9. Defer location generation so it doesn't compete with initial render
         deferTimer = setTimeout(() => {
           book?.locations.generate(1024).catch(() => {});
         }, 1500);
 
-        // 9. Extract chapters in background if not already stored
+        // 10. Extract chapters in background if not already stored
         getChapters(bookId).then((existing) => {
           if (existing.length === 0) {
             import('@/lib/gutenberg/parser').then(async ({ extractChaptersFromEpub }) => {

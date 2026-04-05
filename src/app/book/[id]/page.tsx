@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef, use, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, BookOpen, BookmarkIcon, Highlighter, Volume2 } from 'lucide-react';
+import { ArrowLeft, BookOpen, BookmarkIcon, Highlighter, Volume2, ChevronLeft, ChevronRight, Settings } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { EpubReader } from '@/components/reader/EpubReader';
@@ -368,6 +368,14 @@ export default function ReaderPage({
     }
   }, [settingsOpen, tocOpen, bookmarksOpen, highlight.threadPanelOpen, highlight.highlightMenuVisible, chrome]);
 
+  const handleNextPage = useCallback(() => {
+    renditionRef.current?.next();
+  }, []);
+
+  const handlePrevPage = useCallback(() => {
+    renditionRef.current?.prev();
+  }, []);
+
   // ── Guard: if page data isn't ready, show a loader ────────────────────────
 
   if (!pageReady) {
@@ -417,7 +425,7 @@ export default function ReaderPage({
       />
 
       {/* ── EPUB Reader ───────────────────────────────────────────────────── */}
-      <main className="flex-1 min-h-0">
+      <main className="flex-1 min-h-0 relative">
         <EpubReader
           bookId={bookId}
           initialCfi={initialCfi}
@@ -430,7 +438,67 @@ export default function ReaderPage({
           renditionRef={renditionRef}
           onGetVisibleText={getVisibleTextRef}
         />
+
+        {/* Tap zones are handled inside the epub iframe via EpubReader's
+            hooks.content.register handlers. Visible chevron buttons below
+            provide a fallback for page navigation. */}
       </main>
+
+      {/* ── Visible prev/next buttons ────────────────────────────────────── */}
+      {ready && settings.flowMode !== 'scrolled' && (
+        <>
+          <button
+            type="button"
+            onClick={handlePrevPage}
+            className={cn(
+              'fixed left-1 top-1/2 -translate-y-1/2 z-20',
+              'w-10 h-20 rounded-full flex items-center justify-center',
+              'transition-opacity duration-300 touch-manipulation',
+              'opacity-20 hover:opacity-60 active:opacity-100',
+              settings.theme === 'dark' ? 'text-white/80' : 'text-black/40',
+            )}
+            aria-label="Previous page"
+          >
+            <ChevronLeft className="size-6" />
+          </button>
+          <button
+            type="button"
+            onClick={handleNextPage}
+            className={cn(
+              'fixed right-1 top-1/2 -translate-y-1/2 z-20',
+              'w-10 h-20 rounded-full flex items-center justify-center',
+              'transition-opacity duration-300 touch-manipulation',
+              'opacity-20 hover:opacity-60 active:opacity-100',
+              settings.theme === 'dark' ? 'text-white/80' : 'text-black/40',
+            )}
+            aria-label="Next page"
+          >
+            <ChevronRight className="size-6" />
+          </button>
+        </>
+      )}
+
+      {/* ── Toolbar toggle (always visible, outside iframe) ──────────────── */}
+      {ready && !chrome.visible && (
+        <button
+          type="button"
+          onClick={() => chrome.show()}
+          className={cn(
+            'fixed top-3 right-3 z-20',
+            'w-8 h-8 rounded-full flex items-center justify-center',
+            'backdrop-blur-md border shadow-sm transition-all duration-300',
+            'touch-manipulation opacity-40 hover:opacity-80 active:opacity-100',
+            settings.theme === 'dark'
+              ? 'bg-white/10 text-white/70 border-white/10'
+              : settings.theme === 'sepia'
+                ? 'bg-[#F5E6C8]/80 text-[#5B4636]/70 border-[#d4c4a8]'
+                : 'bg-white/80 text-black/50 border-black/5',
+          )}
+          aria-label="Show toolbar"
+        >
+          <Settings className="size-4" />
+        </button>
+      )}
 
       {/* ── Progress Bar ──────────────────────────────────────────────────── */}
       <div

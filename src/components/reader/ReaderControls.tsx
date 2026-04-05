@@ -52,12 +52,19 @@ export function ReaderControls({
 
   return (
     <Sheet open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
-      <SheetContent side="bottom" showCloseButton={false} className="rounded-t-2xl px-6 pb-8 pt-4">
+      <SheetContent side="bottom" showCloseButton={false} className="rounded-t-2xl px-6 pb-8 pt-4 max-h-[85vh] overflow-y-auto">
         {/* Drag handle */}
         <div className="mx-auto mb-4 h-1 w-10 rounded-full bg-muted-foreground/30" />
 
-        <SheetHeader className="p-0 pb-4">
+        <SheetHeader className="p-0 pb-4 flex flex-row items-center justify-between">
           <SheetTitle>Reading Settings</SheetTitle>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-sm font-medium text-primary touch-manipulation min-h-[44px] px-3"
+          >
+            Done
+          </button>
         </SheetHeader>
 
         <div className="space-y-6">
