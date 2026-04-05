@@ -4,15 +4,19 @@ import { useState, useEffect } from 'react';
 import { Play, Pause, Square, ChevronDown } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { TTSEngine, TTSStatus } from '@/lib/reader/tts';
+import type { ReaderSettings } from '@/types/settings';
+import { getReaderThemeColors } from '@/components/reader/theme-colors';
 
 const SPEED_OPTIONS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
 
 interface TTSControlsProps {
   engine: TTSEngine;
   onStop: () => void;
+  theme: ReaderSettings['theme'];
 }
 
-export function TTSControls({ engine, onStop }: TTSControlsProps) {
+export function TTSControls({ engine, onStop, theme }: TTSControlsProps) {
+  const colors = getReaderThemeColors(theme);
   const [status, setStatus] = useState<TTSStatus>(engine.status);
   const [rate, setRate] = useState(1.0);
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
@@ -73,9 +77,14 @@ export function TTSControls({ engine, onStop }: TTSControlsProps) {
       className={cn(
         'fixed bottom-0 left-0 right-0 z-30',
         'flex items-center gap-3 px-4 py-3',
-        'bg-background/95 backdrop-blur-md border-t',
+        'backdrop-blur-md border-t',
         'animate-in slide-in-from-bottom-2 duration-200'
       )}
+      style={{
+        backgroundColor: `${colors.bg}f2`,
+        borderColor: colors.border,
+        color: colors.text,
+      }}
     >
       {/* Play/Pause */}
       <button
@@ -83,10 +92,10 @@ export function TTSControls({ engine, onStop }: TTSControlsProps) {
         onClick={handlePlayPause}
         className={cn(
           'w-11 h-11 rounded-full flex items-center justify-center',
-          'bg-foreground text-background',
           'hover:opacity-90 active:scale-95 transition-all',
           'touch-manipulation'
         )}
+        style={{ backgroundColor: colors.text, color: colors.bg }}
         aria-label={status === 'speaking' ? 'Pause' : 'Resume'}
       >
         {status === 'speaking' ? (
@@ -102,9 +111,11 @@ export function TTSControls({ engine, onStop }: TTSControlsProps) {
         onClick={handleStop}
         className={cn(
           'w-10 h-10 rounded-full flex items-center justify-center',
-          'border hover:bg-muted transition-colors',
-          'touch-manipulation'
+          'border transition-colors touch-manipulation'
         )}
+        style={{ borderColor: colors.border, color: colors.text }}
+        onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = colors.surfaceHover; }}
+        onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
         aria-label="Stop reading"
       >
         <Square className="size-4" />
@@ -117,25 +128,35 @@ export function TTSControls({ engine, onStop }: TTSControlsProps) {
           onClick={() => setShowSpeedPicker(!showSpeedPicker)}
           className={cn(
             'h-10 px-3 rounded-lg flex items-center gap-1',
-            'border hover:bg-muted transition-colors',
-            'text-sm font-medium touch-manipulation'
+            'border transition-colors text-sm font-medium touch-manipulation'
           )}
+          style={{ borderColor: colors.border, color: colors.text }}
+          onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = colors.surfaceHover; }}
+          onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent'; }}
         >
           {rate}x
           <ChevronDown className="size-3" />
         </button>
         {showSpeedPicker && (
-          <div className="absolute bottom-full mb-2 left-0 bg-popover border rounded-lg shadow-lg p-1 min-w-[80px]">
+          <div
+            className="absolute bottom-full mb-2 left-0 rounded-lg shadow-lg border p-1 min-w-[80px]"
+            style={{ backgroundColor: colors.bg, borderColor: colors.border }}
+          >
             {SPEED_OPTIONS.map((s) => (
               <button
                 key={s}
                 type="button"
                 onClick={() => handleSpeedChange(s)}
                 className={cn(
-                  'w-full px-3 py-1.5 rounded text-sm text-left',
-                  'hover:bg-muted transition-colors',
-                  s === rate && 'font-bold bg-muted'
+                  'w-full px-3 py-1.5 rounded text-sm text-left transition-colors',
+                  s === rate && 'font-bold'
                 )}
+                style={{
+                  backgroundColor: s === rate ? colors.surface : 'transparent',
+                  color: colors.text,
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = colors.surfaceHover; }}
+                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = s === rate ? colors.surface : 'transparent'; }}
               >
                 {s}x
               </button>
@@ -150,9 +171,13 @@ export function TTSControls({ engine, onStop }: TTSControlsProps) {
           value={selectedVoiceIndex}
           onChange={(e) => handleVoiceChange(Number(e.target.value))}
           className={cn(
-            'h-10 px-2 rounded-lg border bg-background text-sm',
-            'max-w-[120px] truncate'
+            'h-10 px-2 rounded-lg border text-sm max-w-[120px] truncate'
           )}
+          style={{
+            backgroundColor: colors.bg,
+            borderColor: colors.border,
+            color: colors.text,
+          }}
           aria-label="Voice"
         >
           {voices.map((v, i) => (
@@ -164,7 +189,7 @@ export function TTSControls({ engine, onStop }: TTSControlsProps) {
       )}
 
       {/* Status label */}
-      <span className="text-xs text-muted-foreground ml-auto">
+      <span className="text-xs ml-auto" style={{ color: colors.muted }}>
         {status === 'speaking' ? 'Reading aloud...' : status === 'paused' ? 'Paused' : ''}
       </span>
     </div>

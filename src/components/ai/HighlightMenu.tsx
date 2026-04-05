@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
-import { MessageSquare, User, Lightbulb, ListOrdered } from 'lucide-react';
+import { MessageSquare, User, Lightbulb, ListOrdered, BookOpen } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { QuestionType } from '@/types/thread';
 import type { HighlightColor } from '@/types/book';
@@ -23,7 +23,8 @@ interface HighlightMenuProps {
   visible: boolean;
 }
 
-const ACTIONS: { type: QuestionType; icon: typeof MessageSquare; label: string }[] = [
+const ACTIONS: { type: QuestionType; icon: typeof MessageSquare; label: string; singleWordOnly?: boolean }[] = [
+  { type: 'define', icon: BookOpen, label: 'Define', singleWordOnly: true },
   { type: 'ask_ai', icon: MessageSquare, label: 'Ask AI' },
   { type: 'who_is_this', icon: User, label: 'Who is this?' },
   { type: 'explain', icon: Lightbulb, label: 'Explain' },
@@ -32,6 +33,7 @@ const ACTIONS: { type: QuestionType; icon: typeof MessageSquare; label: string }
 
 export function HighlightMenu({
   position,
+  selectedText,
   onAction,
   onHighlight,
   onClose,
@@ -152,7 +154,7 @@ export function HighlightMenu({
         </>
       )}
 
-      {ACTIONS.map(({ type, icon: Icon, label }) => (
+      {ACTIONS.filter(a => !a.singleWordOnly || (selectedText && selectedText.trim().split(/\s+/).length === 1)).map(({ type, icon: Icon, label }) => (
         <button
           key={type}
           type="button"

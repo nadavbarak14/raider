@@ -17,6 +17,8 @@ export interface TTSEngine {
   getVoices(): SpeechSynthesisVoice[];
   onEnd: (() => void) | null;
   onStatusChange: ((status: TTSStatus) => void) | null;
+  /** Fires on word boundary with (absoluteCharIndex, charLength) relative to the full text passed to speak() */
+  onWordBoundary: ((charIndex: number, charLength: number) => void) | null;
 }
 
 const MAX_CHUNK_LENGTH = 200; // words per chunk (Chrome 15s bug workaround)
@@ -80,6 +82,7 @@ export function createTTSEngine(): TTSEngine {
   let currentVoice: SpeechSynthesisVoice | null = null;
   let chunkQueue: string[] = [];
   let chunkIndex = 0;
+  let chunkCharOffsets: number[] = []; // cumulative char offset for each chunk
 
   const engine: TTSEngine = {
     get isSupported() {
@@ -90,6 +93,7 @@ export function createTTSEngine(): TTSEngine {
     },
     onEnd: null,
     onStatusChange: null,
+    onWordBoundary: null,
 
     speak(text: string) {
       if (!supported) return;
@@ -98,6 +102,16 @@ export function createTTSEngine(): TTSEngine {
       chunkQueue = chunkText(text);
       chunkIndex = 0;
       if (chunkQueue.length === 0) return;
+
+      // Build cumulative char offsets for each chunk
+      // We search for each chunk in the original text to get precise offsets
+      chunkCharOffsets = [];
+      let searchFrom = 0;
+      for (const chunk of chunkQueue) {
+        const idx = text.indexOf(chunk, searchFrom);
+        chunkCharOffsets.push(idx >= 0 ? idx : searchFrom);
+        searchFrom = (idx >= 0 ? idx : searchFrom) + chunk.length;
+      }
 
       speakNextChunk();
     },
@@ -119,6 +133,7 @@ export function createTTSEngine(): TTSEngine {
       window.speechSynthesis.cancel();
       chunkQueue = [];
       chunkIndex = 0;
+      chunkCharOffsets = [];
       setStatus('idle');
     },
 
@@ -148,7 +163,8 @@ export function createTTSEngine(): TTSEngine {
       return;
     }
 
-    const utterance = new SpeechSynthesisUtterance(chunkQueue[chunkIndex]);
+    const currentChunkIdx = chunkIndex;
+    const utterance = new SpeechSynthesisUtterance(chunkQueue[currentChunkIdx]);
     utterance.rate = currentRate;
     if (currentVoice) utterance.voice = currentVoice;
 
@@ -165,6 +181,22 @@ export function createTTSEngine(): TTSEngine {
       } else {
         setStatus('idle');
         engine.onEnd?.();
+      }
+    };
+
+    // Word boundary events for highlighting
+    utterance.onboundary = (event) => {
+      if (event.name === 'word' && engine.onWordBoundary) {
+        const absoluteOffset = (chunkCharOffsets[currentChunkIdx] || 0) + event.charIndex;
+        // Estimate char length from the event or by finding the word end
+        let charLen = event.charLength ?? 0;
+        if (charLen === 0) {
+          // Some browsers don't set charLength — estimate from text
+          const remaining = chunkQueue[currentChunkIdx].slice(event.charIndex);
+          const match = remaining.match(/^\S+/);
+          charLen = match ? match[0].length : 5;
+        }
+        engine.onWordBoundary(absoluteOffset, charLen);
       }
     };
 

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef, use, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, BookOpen, BookmarkIcon, Highlighter, Volume2, ChevronLeft, ChevronRight, Settings } from 'lucide-react';
+import { BookOpen } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { EpubReader } from '@/components/reader/EpubReader';
@@ -10,7 +10,7 @@ import { ReaderControls } from '@/components/reader/ReaderControls';
 import { ProgressBar } from '@/components/reader/ProgressBar';
 import { TableOfContents } from '@/components/reader/TableOfContents';
 import { Bookmarks } from '@/components/reader/Bookmarks';
-import { ReaderHeader, getChromeColors } from '@/components/reader/ReaderHeader';
+import { ReaderHeader, type ReaderMenuAction } from '@/components/reader/ReaderHeader';
 import { HighlightMenu } from '@/components/ai/HighlightMenu';
 import { HighlightsPanel } from '@/components/reader/HighlightsPanel';
 import { DictionaryPopup } from '@/components/reader/DictionaryPopup';
@@ -18,8 +18,10 @@ import { TTSControls } from '@/components/reader/TTSControls';
 import { ThreadPanel } from '@/components/ai/ThreadPanel';
 import { MarginMarkers } from '@/components/ai/MarginMarkers';
 import { GeneralChat } from '@/components/ai/GeneralChat';
+import { SearchPanel } from '@/components/reader/SearchPanel';
 import { useChromeVisibility } from '@/hooks/useChromeVisibility';
 import { useHighlightInteraction } from '@/hooks/useHighlightInteraction';
+import { getReaderThemeColors } from '@/components/reader/theme-colors';
 import type { Book, ReadingProgress, Highlight, HighlightColor } from '@/types/book';
 import type { ReaderSettings } from '@/types/settings';
 import { DEFAULT_READER_SETTINGS } from '@/types/settings';
@@ -36,6 +38,104 @@ import { createReadingSpeedTracker } from '@/lib/reader/reading-speed';
 import { getReadingTimeEstimates } from '@/lib/reader/reading-time';
 import { startSession, endSession } from '@/lib/reader/sessions';
 import { createTTSEngine, type TTSEngine } from '@/lib/reader/tts';
+
+// ── Touch Overlay — reliable tap/swipe detection on top of epub iframe ───────
+
+function TouchOverlay({
+  onTapLeft,
+  onTapRight,
+  onTapCenter,
+}: {
+  onTapLeft: () => void;
+  onTapRight: () => void;
+  onTapCenter: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const touchRef = useRef<{ x: number; y: number; time: number } | null>(null);
+  const touchHandledRef = useRef(false);
+  const lastNavRef = useRef(0); // cooldown to prevent rapid multi-page turns
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+
+    function navigate(action: () => void) {
+      const now = Date.now();
+      if (now - lastNavRef.current < 300) return; // 300ms cooldown
+      lastNavRef.current = now;
+      action();
+    }
+
+    function onTouchStart(e: TouchEvent) {
+      if (e.touches.length !== 1) return;
+      touchHandledRef.current = false;
+      touchRef.current = {
+        x: e.touches[0].clientX,
+        y: e.touches[0].clientY,
+        time: Date.now(),
+      };
+    }
+
+    function onTouchEnd(e: TouchEvent) {
+      const start = touchRef.current;
+      if (!start) return;
+      touchRef.current = null;
+      touchHandledRef.current = true;
+      if (e.changedTouches.length === 0) return;
+
+      const endX = e.changedTouches[0].clientX;
+      const endY = e.changedTouches[0].clientY;
+      const dx = endX - start.x;
+      const dy = endY - start.y;
+      const elapsed = Date.now() - start.time;
+
+      // Swipe detection (require 80px+ horizontal movement)
+      if (elapsed < 600 && Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 80) {
+        navigate(dx < 0 ? onTapRight : onTapLeft);
+        return;
+      }
+
+      // Tap detection
+      if (Math.abs(dx) < 30 && Math.abs(dy) < 30 && elapsed < 400) {
+        const width = el!.clientWidth;
+        const relX = endX / width;
+        if (relX < 0.3) navigate(onTapLeft);
+        else if (relX > 0.7) navigate(onTapRight);
+        else navigate(onTapCenter);
+      }
+    }
+
+    function onClick(e: MouseEvent) {
+      // Skip if touch already handled (prevents double-fire on mobile)
+      if (touchHandledRef.current) {
+        touchHandledRef.current = false;
+        return;
+      }
+      const width = el!.clientWidth;
+      const relX = e.clientX / width;
+      if (relX < 0.3) navigate(onTapLeft);
+      else if (relX > 0.7) navigate(onTapRight);
+      else navigate(onTapCenter);
+    }
+
+    el.addEventListener('touchstart', onTouchStart, { passive: true });
+    el.addEventListener('touchend', onTouchEnd, { passive: true });
+    el.addEventListener('click', onClick);
+    return () => {
+      el.removeEventListener('touchstart', onTouchStart);
+      el.removeEventListener('touchend', onTouchEnd);
+      el.removeEventListener('click', onClick);
+    };
+  }, [onTapLeft, onTapRight, onTapCenter]);
+
+  return (
+    <div
+      ref={ref}
+      className="absolute inset-0 z-10"
+      style={{ touchAction: 'manipulation' }}
+    />
+  );
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -67,12 +167,15 @@ export default function ReaderPage({
   const [currentChapter, setCurrentChapter] = useState(0);
   const [percent, setPercent] = useState(0);
   const [totalChapters, setTotalChapters] = useState(0);
+  const [currentPage, setCurrentPage] = useState<number | undefined>(undefined);
+  const [totalPages, setTotalPages] = useState<number | undefined>(undefined);
 
   // UI toggles
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tocOpen, setTocOpen] = useState(false);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
   const [highlightsPanelOpen, setHighlightsPanelOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [isBookmarked, setIsBookmarked] = useState(false);
 
   // Highlights
@@ -87,6 +190,8 @@ export default function ReaderPage({
   const speedTrackerRef = useRef(createReadingSpeedTracker());
   const [chapterMinutesLeft, setChapterMinutesLeft] = useState<number | undefined>(undefined);
   const [bookMinutesLeft, setBookMinutesLeft] = useState<number | undefined>(undefined);
+  const sessionStartTimeRef = useRef(Date.now());
+  const startPercentRef = useRef(0);
 
   // Session tracking
   const sessionIdRef = useRef<string | null>(null);
@@ -97,6 +202,7 @@ export default function ReaderPage({
   const [ttsActive, setTtsActive] = useState(false);
   const [ttsSupported, setTtsSupported] = useState(false);
   const getVisibleTextRef = useRef<(() => string) | null>(null);
+  const ttsCleanupRef = useRef<(() => void) | null>(null);
 
   // Check TTS support on client only (avoids hydration mismatch)
   useEffect(() => {
@@ -112,7 +218,7 @@ export default function ReaderPage({
 
   const chrome = useChromeVisibility({
     ready,
-    panelsOpen: [settingsOpen, tocOpen, bookmarksOpen, highlightsPanelOpen, highlight.threadPanelOpen],
+    panelsOpen: [settingsOpen, tocOpen, bookmarksOpen, highlightsPanelOpen, searchOpen, highlight.threadPanelOpen],
   });
 
   // Derive chapter name from tocEntries + currentChapter
@@ -126,6 +232,9 @@ export default function ReaderPage({
   // Rendition ref for external navigation
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const renditionRef = useRef<any>(null);
+
+  // Theme colors
+  const colors = getReaderThemeColors(settings.theme);
 
   // ── Initialize: load book metadata, settings, and progress ───────────────
 
@@ -160,10 +269,12 @@ export default function ReaderPage({
         setCurrentChapter(progress.currentChapterIndex);
         setPercent(progress.percentComplete);
         setTotalChapters(progress.totalChapters);
+        startPercentRef.current = progress.percentComplete;
       }
 
       // Start reading speed tracker and session
       speedTrackerRef.current.startSession();
+      sessionStartTimeRef.current = Date.now();
       const sid = await startSession(bookId);
       if (!cancelled) sessionIdRef.current = sid;
 
@@ -190,13 +301,46 @@ export default function ReaderPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bookId]);
 
+  // ── Keyboard shortcut: Ctrl+F for search ────────────────────────────────
+
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+      if (e.key === 'Escape' && searchOpen) {
+        setSearchOpen(false);
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [searchOpen]);
+
   // ── Callbacks ─────────────────────────────────────────────────────────────
 
   const handleLocationChanged = useCallback(
-    async (cfi: string, chapterIndex: number, pct: number) => {
+    async (cfi: string, chapterIndex: number, pct: number, pageInfo?: { current: number; total: number }) => {
       setCurrentCfi(cfi);
       setCurrentChapter(chapterIndex);
       setPercent(pct);
+
+      // Use page info from relocated event, or query rendition directly
+      if (pageInfo?.current != null && pageInfo?.total != null) {
+        setCurrentPage(pageInfo.current);
+        setTotalPages(pageInfo.total);
+      } else {
+        // Fallback: query rendition.location directly
+        try {
+          const loc = renditionRef.current?.location;
+          if (loc?.start?.displayed) {
+            setCurrentPage(loc.start.displayed.page);
+            setTotalPages(loc.start.displayed.total);
+          }
+        } catch {
+          // Non-critical
+        }
+      }
 
       // Track reading speed and pages (estimate ~250 words per page turn)
       speedTrackerRef.current.recordPageTurn(250);
@@ -219,17 +363,47 @@ export default function ReaderPage({
       setIsBookmarked(bookmarked);
 
       // Update reading time estimates
-      const wpm = speedTrackerRef.current.getWPM();
-      const estimates = await getReadingTimeEstimates(bookId, chapterIndex, pct, wpm);
-      setChapterMinutesLeft(estimates.chapterMinutesLeft);
-      setBookMinutesLeft(estimates.bookMinutesLeft);
+      // Use session-based estimation as primary (more reliable than word-count based)
+      const sessionMinutes = (Date.now() - sessionStartTimeRef.current) / 60000;
+      const progressMade = pct - startPercentRef.current;
+
+      if (sessionMinutes >= 1 && progressMade > 0.5) {
+        // Session-based estimate: how long to finish based on current pace
+        const minutesPerPercent = sessionMinutes / progressMade;
+        const remaining = (100 - pct) * minutesPerPercent;
+        setBookMinutesLeft(Math.max(1, remaining));
+
+        // Chapter estimate (rough: assume equal chapter sizes)
+        if (totalChapters > 0) {
+          const chapterPercent = 100 / totalChapters;
+          const progressInChapter = pct - (chapterIndex * chapterPercent);
+          const remainingInChapter = chapterPercent - progressInChapter;
+          if (remainingInChapter > 0) {
+            setChapterMinutesLeft(Math.max(1, remainingInChapter * minutesPerPercent));
+          }
+        }
+      } else {
+        // Fallback to word-count based estimation
+        const wpm = speedTrackerRef.current.getWPM();
+        const estimates = await getReadingTimeEstimates(bookId, chapterIndex, pct, wpm);
+        // Only show if the estimate seems reasonable (> 1 minute)
+        setChapterMinutesLeft(
+          estimates.chapterMinutesLeft != null && estimates.chapterMinutesLeft >= 1
+            ? estimates.chapterMinutesLeft
+            : undefined
+        );
+        setBookMinutesLeft(
+          estimates.bookMinutesLeft != null && estimates.bookMinutesLeft >= 1
+            ? estimates.bookMinutesLeft
+            : undefined
+        );
+      }
     },
     [bookId, totalChapters]
   );
 
   const handleReady = useCallback(
     (total: number) => {
-      setTotalChapters(total);
       setReady(true);
 
       // Extract TOC entries from the epub book via rendition
@@ -237,16 +411,22 @@ export default function ReaderPage({
       if (rendition?.book) {
         rendition.book.loaded.navigation.then(
           (nav: { toc: Array<{ href: string; label: string }> }) => {
-            if (nav?.toc) {
-              setTocEntries(
-                nav.toc.map((entry) => ({
-                  label: entry.label?.trim() || '',
-                  href: entry.href,
-                }))
-              );
+            if (nav?.toc && nav.toc.length > 0) {
+              const entries = nav.toc.map((entry) => ({
+                label: entry.label?.trim() || '',
+                href: entry.href,
+              }));
+              setTocEntries(entries);
+              // Use TOC count as chapter count — more accurate than spine items
+              setTotalChapters(entries.length);
+            } else {
+              // Fallback to spine count if no TOC
+              setTotalChapters(total);
             }
           }
         );
+      } else {
+        setTotalChapters(total);
       }
     },
     []
@@ -263,7 +443,15 @@ export default function ReaderPage({
   const handleTocNavigate = useCallback((href: string) => {
     const rendition = renditionRef.current;
     if (rendition) {
-      rendition.display(href);
+      // epubjs needs the href passed through the book's canonical URL resolver
+      // to handle relative paths within the EPUB correctly
+      const book = rendition.book;
+      if (book?.canonical) {
+        const resolved = book.canonical(href);
+        rendition.display(resolved);
+      } else {
+        rendition.display(href);
+      }
     }
   }, []);
 
@@ -280,19 +468,20 @@ export default function ReaderPage({
     setIsBookmarked(nowBookmarked);
   }, [bookId, currentCfi, currentChapter]);
 
-  // Route text selection: single word -> dictionary, multi-word -> highlight menu
+  // Show highlight menu for ALL text selections (single-word and multi-word)
   const handleTextSelected = useCallback(
     (cfi: string, text: string, rect: DOMRect) => {
       const trimmed = text.trim();
       if (!trimmed) return;
 
+      // Always show highlight/AI menu for any selection
+      highlight.handleTextSelected(cfi, text, rect);
+
+      // Also prepare dictionary data for single words (menu will have "Define" option)
       const isSingleWord = trimmed.split(/\s+/).length === 1;
       if (isSingleWord) {
         setDictionaryWord(trimmed);
         setDictionaryPosition({ x: rect.left + rect.width / 2, y: rect.top });
-        setDictionaryVisible(true);
-      } else {
-        highlight.handleTextSelected(cfi, text, rect);
       }
     },
     [highlight]
@@ -316,6 +505,24 @@ export default function ReaderPage({
     [bookId, currentChapter, highlight]
   );
 
+  const handleHighlightAction = useCallback(
+    (type: Parameters<typeof highlight.handleHighlightAction>[0]) => {
+      if (type === 'define') {
+        // Show dictionary popup for the selected word
+        const word = highlight.selectedText?.trim();
+        if (word) {
+          setDictionaryWord(word);
+          setDictionaryPosition(highlight.highlightMenuPosition);
+          setDictionaryVisible(true);
+          highlight.dismissHighlightMenu();
+        }
+        return;
+      }
+      highlight.handleHighlightAction(type);
+    },
+    [highlight]
+  );
+
   const handleHighlightNavigate = useCallback((cfiRange: string) => {
     const rendition = renditionRef.current;
     if (rendition) {
@@ -323,9 +530,18 @@ export default function ReaderPage({
     }
   }, []);
 
+  const handleSearchNavigate = useCallback((cfi: string) => {
+    const rendition = renditionRef.current;
+    if (rendition) {
+      rendition.display(cfi);
+    }
+  }, []);
+
   const handleTTSToggle = useCallback(() => {
     if (ttsActive) {
       ttsEngineRef.current?.stop();
+      ttsCleanupRef.current?.();
+      ttsCleanupRef.current = null;
       setTtsActive(false);
       return;
     }
@@ -337,16 +553,112 @@ export default function ReaderPage({
     const engine = ttsEngineRef.current;
     if (!engine.isSupported) return;
 
-    // Set up auto-advance: when TTS finishes the page, go to next page
+    // Get iframe document for highlighting
+    const iframe = document.querySelector('main iframe') as HTMLIFrameElement | null;
+    const iframeDoc = iframe?.contentDocument;
+
+    // Build text-node map for word highlighting
+    function buildTextMap(body: HTMLElement) {
+      const map: { node: Text; start: number; end: number }[] = [];
+      let offset = 0;
+      const walker = body.ownerDocument.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+      let node: Text | null;
+      while ((node = walker.nextNode() as Text | null)) {
+        const len = node.textContent?.length || 0;
+        map.push({ node, start: offset, end: offset + len });
+        offset += len;
+      }
+      return map;
+    }
+
+    let textMap: { node: Text; start: number; end: number }[] = [];
+    if (iframeDoc?.body) {
+      textMap = buildTextMap(iframeDoc.body);
+
+      // Inject highlight overlay into iframe
+      let overlay = iframeDoc.getElementById('tts-hl-overlay');
+      if (!overlay) {
+        overlay = iframeDoc.createElement('div');
+        overlay.id = 'tts-hl-overlay';
+        overlay.style.cssText = 'position:absolute;pointer-events:none;background:rgba(96,165,250,0.35);border-radius:3px;transition:left 0.08s,top 0.08s,width 0.08s;z-index:9999;display:none;';
+        iframeDoc.body.appendChild(overlay);
+      }
+    }
+
+    function highlightWordAt(charIndex: number, charLen: number) {
+      if (!iframeDoc?.body) return;
+      const overlay = iframeDoc.getElementById('tts-hl-overlay');
+      if (!overlay) return;
+
+      // Find the text node containing this offset
+      for (const entry of textMap) {
+        if (charIndex >= entry.start && charIndex < entry.end) {
+          const localOffset = charIndex - entry.start;
+          const endOffset = Math.min(localOffset + charLen, entry.node.textContent?.length || 0);
+          try {
+            const range = iframeDoc.createRange();
+            range.setStart(entry.node, localOffset);
+            range.setEnd(entry.node, endOffset);
+            const rect = range.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+              const scrollX = iframeDoc.documentElement.scrollLeft || iframeDoc.body.scrollLeft || 0;
+              const scrollY = iframeDoc.documentElement.scrollTop || iframeDoc.body.scrollTop || 0;
+              overlay.style.left = (rect.left + scrollX) + 'px';
+              overlay.style.top = (rect.top + scrollY) + 'px';
+              overlay.style.width = rect.width + 'px';
+              overlay.style.height = rect.height + 'px';
+              overlay.style.display = 'block';
+              // Auto-scroll: keep highlighted word visible
+              const viewH = iframeDoc.documentElement.clientHeight;
+              if (rect.top < 40 || rect.bottom > viewH - 40) {
+                entry.node.parentElement?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }
+            }
+          } catch {
+            // Range creation can fail
+          }
+          return;
+        }
+      }
+    }
+
+    function clearHighlight() {
+      if (!iframeDoc) return;
+      const overlay = iframeDoc.getElementById('tts-hl-overlay');
+      if (overlay) overlay.style.display = 'none';
+    }
+
+    // Store cleanup function
+    ttsCleanupRef.current = clearHighlight;
+
+    // Word boundary highlighting
+    engine.onWordBoundary = (charIndex, charLen) => {
+      highlightWordAt(charIndex, charLen);
+    };
+
+    // Auto-advance: when TTS finishes the page, go to next page
     engine.onEnd = () => {
+      clearHighlight();
       const rendition = renditionRef.current;
       if (!rendition) return;
       rendition.next().then(() => {
-        // After page turn, wait a beat for content to load, then read new page
+        // After page turn, wait for content to load, then rebuild map and read new page
         setTimeout(() => {
+          const newIframeDoc = (document.querySelector('main iframe') as HTMLIFrameElement)?.contentDocument;
+          if (newIframeDoc?.body) {
+            textMap = buildTextMap(newIframeDoc.body);
+            // Re-inject overlay
+            let newOverlay = newIframeDoc.getElementById('tts-hl-overlay');
+            if (!newOverlay) {
+              newOverlay = newIframeDoc.createElement('div');
+              newOverlay.id = 'tts-hl-overlay';
+              newOverlay.style.cssText = 'position:absolute;pointer-events:none;background:rgba(96,165,250,0.35);border-radius:3px;transition:left 0.08s,top 0.08s,width 0.08s;z-index:9999;display:none;';
+              newIframeDoc.body.appendChild(newOverlay);
+            }
+          }
           const text = getVisibleTextRef.current?.();
           if (text) engine.speak(text);
-        }, 500);
+        }, 600);
       });
     };
 
@@ -359,22 +671,43 @@ export default function ReaderPage({
   }, [ttsActive]);
 
   const handleTTSStop = useCallback(() => {
+    ttsCleanupRef.current?.();
+    ttsCleanupRef.current = null;
     setTtsActive(false);
   }, []);
 
+  const chromeToggle = chrome.toggle;
   const handleCenterTap = useCallback(() => {
-    if (!settingsOpen && !tocOpen && !bookmarksOpen && !highlight.threadPanelOpen && !highlight.highlightMenuVisible) {
-      chrome.toggle();
+    if (!settingsOpen && !tocOpen && !bookmarksOpen && !searchOpen && !highlight.threadPanelOpen && !highlight.highlightMenuVisible) {
+      chromeToggle();
     }
-  }, [settingsOpen, tocOpen, bookmarksOpen, highlight.threadPanelOpen, highlight.highlightMenuVisible, chrome]);
+  }, [settingsOpen, tocOpen, bookmarksOpen, searchOpen, highlight.threadPanelOpen, highlight.highlightMenuVisible, chromeToggle]);
 
-  const handleNextPage = useCallback(() => {
-    renditionRef.current?.next();
-  }, []);
 
-  const handlePrevPage = useCallback(() => {
-    renditionRef.current?.prev();
-  }, []);
+  // ── Menu action handler ──────────────────────────────────────────────────
+
+  const handleMenuAction = useCallback((action: ReaderMenuAction) => {
+    switch (action) {
+      case 'toc':
+        setTocOpen(true);
+        break;
+      case 'bookmarks':
+        setBookmarksOpen(true);
+        break;
+      case 'highlights':
+        setHighlightsPanelOpen(true);
+        break;
+      case 'search':
+        setSearchOpen(true);
+        break;
+      case 'tts':
+        handleTTSToggle();
+        break;
+      case 'settings':
+        setSettingsOpen(true);
+        break;
+    }
+  }, [handleTTSToggle]);
 
   // ── Guard: if page data isn't ready, show a loader ────────────────────────
 
@@ -397,15 +730,12 @@ export default function ReaderPage({
             Could not find this book. It may have been removed.
           </p>
           <Button variant="outline" onClick={() => router.push('/')}>
-            <ArrowLeft className="size-4 mr-2" />
             Back to Library
           </Button>
         </div>
       </div>
     );
   }
-
-  const { bg: chromeBg, text: chromeText, border: chromeBorder } = getChromeColors(settings.theme);
 
   return (
     <div className="fixed inset-0 flex flex-col overflow-hidden">
@@ -418,19 +748,18 @@ export default function ReaderPage({
         ttsActive={ttsActive}
         ttsSupported={ttsSupported}
         onBack={() => router.push('/')}
-        onTocOpen={() => setTocOpen(true)}
+        onMenuAction={handleMenuAction}
         onBookmarkToggle={handleToggleBookmark}
-        onSettingsOpen={() => setSettingsOpen(true)}
-        onTTSToggle={handleTTSToggle}
       />
 
       {/* ── EPUB Reader ───────────────────────────────────────────────────── */}
-      <main className="flex-1 min-h-0 relative">
+      <main className="flex-1 min-h-0 relative" style={{ paddingBottom: '28px' }}>
         <EpubReader
           bookId={bookId}
           initialCfi={initialCfi}
           settings={settings}
           highlights={highlights}
+          ttsActive={ttsActive}
           onLocationChanged={handleLocationChanged}
           onTextSelected={handleTextSelected}
           onReady={handleReady}
@@ -439,88 +768,38 @@ export default function ReaderPage({
           onGetVisibleText={getVisibleTextRef}
         />
 
-        {/* Tap zones are handled inside the epub iframe via EpubReader's
-            hooks.content.register handlers. Visible chevron buttons below
-            provide a fallback for page navigation. */}
+        {/* Touch overlay — captures taps/swipes reliably on top of epub iframe */}
+        {ready && settings.flowMode !== 'scrolled' && (
+          <TouchOverlay
+            onTapLeft={() => renditionRef.current?.prev()}
+            onTapRight={() => renditionRef.current?.next()}
+            onTapCenter={handleCenterTap}
+          />
+        )}
       </main>
 
-      {/* ── Visible prev/next buttons ────────────────────────────────────── */}
-      {ready && settings.flowMode !== 'scrolled' && (
-        <>
-          <button
-            type="button"
-            onClick={handlePrevPage}
-            className={cn(
-              'fixed left-1 top-1/2 -translate-y-1/2 z-20',
-              'w-10 h-20 rounded-full flex items-center justify-center',
-              'transition-opacity duration-300 touch-manipulation',
-              'opacity-20 hover:opacity-60 active:opacity-100',
-              settings.theme === 'dark' ? 'text-white/80' : 'text-black/40',
-            )}
-            aria-label="Previous page"
-          >
-            <ChevronLeft className="size-6" />
-          </button>
-          <button
-            type="button"
-            onClick={handleNextPage}
-            className={cn(
-              'fixed right-1 top-1/2 -translate-y-1/2 z-20',
-              'w-10 h-20 rounded-full flex items-center justify-center',
-              'transition-opacity duration-300 touch-manipulation',
-              'opacity-20 hover:opacity-60 active:opacity-100',
-              settings.theme === 'dark' ? 'text-white/80' : 'text-black/40',
-            )}
-            aria-label="Next page"
-          >
-            <ChevronRight className="size-6" />
-          </button>
-        </>
-      )}
-
-      {/* ── Toolbar toggle (always visible, outside iframe) ──────────────── */}
-      {ready && !chrome.visible && (
-        <button
-          type="button"
-          onClick={() => chrome.show()}
+      {/* ── Progress Bar — always visible at bottom ──────────────────────── */}
+      {ready && (
+        <div
           className={cn(
-            'fixed top-3 right-3 z-20',
-            'w-8 h-8 rounded-full flex items-center justify-center',
-            'backdrop-blur-md border shadow-sm transition-all duration-300',
-            'touch-manipulation opacity-40 hover:opacity-80 active:opacity-100',
-            settings.theme === 'dark'
-              ? 'bg-white/10 text-white/70 border-white/10'
-              : settings.theme === 'sepia'
-                ? 'bg-[#F5E6C8]/80 text-[#5B4636]/70 border-[#d4c4a8]'
-                : 'bg-white/80 text-black/50 border-black/5',
+            'absolute bottom-0 left-0 right-0 z-20',
+            'transition-all duration-300',
           )}
-          aria-label="Show toolbar"
         >
-          <Settings className="size-4" />
-        </button>
+          <ProgressBar
+            percent={percent}
+            chapterName={currentChapterName}
+            currentChapter={currentChapter}
+            totalChapters={totalChapters || 1}
+            chapterMinutesLeft={chapterMinutesLeft}
+            bookMinutesLeft={bookMinutesLeft}
+            theme={settings.theme}
+            currentPage={currentPage}
+            totalPages={totalPages}
+            chromeVisible={chrome.visible}
+          />
+        </div>
       )}
-
-      {/* ── Progress Bar ──────────────────────────────────────────────────── */}
-      <div
-        className={cn(
-          'absolute bottom-0 left-0 right-0 z-20',
-          'transition-all duration-300',
-          chromeBg,
-          chromeText,
-          chrome.visible
-            ? 'translate-y-0 opacity-100'
-            : 'translate-y-full opacity-0 pointer-events-none'
-        )}
-      >
-        <ProgressBar
-          percent={percent}
-          chapterName={currentChapterName}
-          currentChapter={currentChapter}
-          totalChapters={totalChapters || 1}
-          chapterMinutesLeft={chapterMinutesLeft}
-          bookMinutesLeft={bookMinutesLeft}
-        />
-      </div>
 
       {/* ── Panels/Sheets ─────────────────────────────────────────────────── */}
       <ReaderControls
@@ -536,6 +815,7 @@ export default function ReaderPage({
         onNavigate={handleTocNavigate}
         open={tocOpen}
         onClose={() => setTocOpen(false)}
+        theme={settings.theme}
       />
 
       <Bookmarks
@@ -554,41 +834,13 @@ export default function ReaderPage({
         onClose={() => setHighlightsPanelOpen(false)}
       />
 
-      {/* ── Floating action buttons ──────────────────────────────────────── */}
-      {chrome.visible && (
-        <div className="fixed bottom-14 right-3 z-20 flex flex-col gap-2">
-          <button
-            type="button"
-            onClick={() => setHighlightsPanelOpen(true)}
-            className={cn(
-              'w-10 h-10 rounded-full flex items-center justify-center',
-              'backdrop-blur-md border shadow-sm transition-all duration-300',
-              'touch-manipulation',
-              chromeBg,
-              chromeText,
-              chromeBorder
-            )}
-            aria-label="View all highlights"
-          >
-            <Highlighter className="size-4" />
-          </button>
-          <button
-            type="button"
-            onClick={() => setBookmarksOpen(true)}
-            className={cn(
-              'w-10 h-10 rounded-full flex items-center justify-center',
-              'backdrop-blur-md border shadow-sm transition-all duration-300',
-              'touch-manipulation',
-              chromeBg,
-              chromeText,
-              chromeBorder
-            )}
-            aria-label="View all bookmarks"
-          >
-            <BookmarkIcon className="size-4" />
-          </button>
-        </div>
-      )}
+      <SearchPanel
+        open={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        onNavigate={handleSearchNavigate}
+        theme={settings.theme}
+        rendition={renditionRef.current}
+      />
 
       {/* ── AI Components ──────────────────────────────────────────────── */}
 
@@ -603,7 +855,7 @@ export default function ReaderPage({
         position={highlight.highlightMenuPosition}
         selectedText={highlight.selectedText}
         selectedCfi={highlight.selectedCfi}
-        onAction={highlight.handleHighlightAction}
+        onAction={handleHighlightAction}
         onHighlight={handleHighlightColor}
         onClose={highlight.dismissHighlightMenu}
         visible={highlight.highlightMenuVisible}
@@ -642,6 +894,7 @@ export default function ReaderPage({
         <TTSControls
           engine={ttsEngineRef.current}
           onStop={handleTTSStop}
+          theme={settings.theme}
         />
       )}
     </div>

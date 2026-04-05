@@ -62,6 +62,37 @@ const FONT_MAP: Record<ReaderSettings['fontFamily'], string> = {
   dyslexia: 'OpenDyslexic, "Comic Sans MS", system-ui, sans-serif',
 };
 
+// ── Apply settings to a rendition (extracted so it can be called from init + effect) ──
+
+function applySettingsToRendition(rendition: EpubRendition, settings: ReaderSettings) {
+  const themeStyles = THEME_STYLES[settings.theme];
+  const fontFamily = FONT_MAP[settings.fontFamily];
+  const marginPx =
+    settings.margins === 'narrow' ? '8px' : settings.margins === 'wide' ? '40px' : '20px';
+
+  rendition.themes.default({
+    body: {
+      'font-size': `${settings.fontSize}px !important`,
+      'line-height': `${settings.lineSpacing} !important`,
+      'font-family': `${fontFamily} !important`,
+      'padding-left': `${marginPx} !important`,
+      'padding-right': `${marginPx} !important`,
+      'padding-top': '0 !important',
+      'padding-bottom': '0 !important',
+      margin: '0 !important',
+      ...themeStyles.body,
+    },
+    'body, p, div, span, li, td, th, blockquote, cite, em, strong, a, h1, h2, h3, h4, h5, h6': {
+      'font-size': `${settings.fontSize}px !important`,
+      'line-height': `${settings.lineSpacing} !important`,
+      'font-family': `${fontFamily} !important`,
+      'text-align': `${settings.textAlign} !important`,
+      ...themeStyles.bodyAll,
+    },
+  });
+  rendition.themes.select('default');
+}
+
 // ── Props ────────────────────────────────────────────────────────────────────
 
 interface EpubReaderProps {
@@ -69,7 +100,8 @@ interface EpubReaderProps {
   initialCfi?: string;
   settings: ReaderSettings;
   highlights?: Highlight[];
-  onLocationChanged?: (cfi: string, chapterIndex: number, percent: number) => void;
+  ttsActive?: boolean;
+  onLocationChanged?: (cfi: string, chapterIndex: number, percent: number, pageInfo?: { current: number; total: number }) => void;
   onTextSelected?: (cfi: string, selectedText: string, rect: DOMRect) => void;
   onReady?: (totalChapters: number) => void;
   /** Called when user taps the middle 40% of the reader (toggle chrome) */
@@ -85,6 +117,7 @@ export function EpubReader({
   initialCfi,
   settings,
   highlights = [],
+  ttsActive = false,
   onLocationChanged,
   onTextSelected,
   onReady,
@@ -102,6 +135,10 @@ export function EpubReader({
   const lastCfiRef = useRef<string | undefined>(undefined);
   const flowModeRef = useRef(settings.flowMode);
   flowModeRef.current = settings.flowMode;
+
+  // Keep a ref to settings so the init closure can access the latest
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
 
   // Stable callback refs so we don't re-run the effect when callbacks change
   const onLocationChangedRef = useRef(onLocationChanged);
@@ -184,6 +221,13 @@ export function EpubReader({
           (renditionRef as React.MutableRefObject<EpubRendition | null>).current = rendition;
         }
 
+        // 4. Apply settings immediately so theme/fonts are correct on first render
+        try {
+          applySettingsToRendition(rendition, settingsRef.current);
+        } catch {
+          // Non-fatal
+        }
+
         // Expose getVisibleText for TTS
         if (onGetVisibleText) {
           (onGetVisibleText as React.MutableRefObject<(() => string) | null>).current = () => {
@@ -197,7 +241,7 @@ export function EpubReader({
           };
         }
 
-        // 4. Set up event listeners BEFORE display() so they capture initial content
+        // 5. Set up event listeners BEFORE display() so they capture initial content
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         rendition.on('relocated', (location: any) => {
           if (!location?.start) return;
@@ -208,7 +252,25 @@ export function EpubReader({
             ? Math.round(location.start.percentage * 100)
             : 0;
           const chapterIndex = location.start.index ?? 0;
-          onLocationChangedRef.current?.(cfi, chapterIndex, percent);
+          // Get page info from the location object or rendition
+          let pageInfo: { current: number; total: number } | undefined;
+          const displayed = location.start?.displayed;
+          if (displayed?.page != null && displayed?.total != null && displayed.total > 0) {
+            pageInfo = { current: displayed.page as number, total: displayed.total as number };
+          }
+          // Fallback: query rendition.location directly (it might have fresher data)
+          if (!pageInfo) {
+            try {
+              const rend = internalRenditionRef.current;
+              const loc = rend?.location?.start?.displayed;
+              if (loc?.page != null && loc?.total != null && loc.total > 0) {
+                pageInfo = { current: loc.page, total: loc.total };
+              }
+            } catch {
+              // non-critical
+            }
+          }
+          onLocationChangedRef.current?.(cfi, chapterIndex, percent, pageInfo);
         });
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -219,17 +281,25 @@ export function EpubReader({
             const selectedText = selection.toString().trim();
             if (!selectedText) return;
             const range = selection.getRangeAt(0);
-            const rect = range.getBoundingClientRect();
-            onTextSelectedRef.current?.(cfiRange, selectedText, rect);
+            const iframeRect = range.getBoundingClientRect();
+
+            // Adjust coordinates from iframe-local to main viewport
+            const iframe = containerRef.current?.querySelector('iframe');
+            const iframeOffset = iframe?.getBoundingClientRect();
+            const adjustedRect = new DOMRect(
+              iframeRect.x + (iframeOffset?.x || 0),
+              iframeRect.y + (iframeOffset?.y || 0),
+              iframeRect.width,
+              iframeRect.height
+            );
+
+            onTextSelectedRef.current?.(cfiRange, selectedText, adjustedRect);
           } catch {
             // Selection handling is non-critical
           }
         });
 
-        // 5. Register touch/click handlers inside epub iframe content
-        //    MUST be registered BEFORE display() so the initial content gets handlers.
-        //    Events inside the iframe don't bubble to React, so we must
-        //    attach listeners directly to each content document.
+        // 6. Register touch/click handlers inside epub iframe content
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         rendition.hooks.content.register((contents: any) => {
           const doc: Document = contents.document;
@@ -266,23 +336,65 @@ export function EpubReader({
               return;
             }
 
-            // Tap detection (minimal finger movement)
-            if (Math.abs(deltaX) < 10 && Math.abs(deltaY) < 10) {
+            // Tap detection — generous 25px tolerance for finger jitter on phones
+            if (Math.abs(deltaX) < 25 && Math.abs(deltaY) < 25 && elapsed < 500) {
               const sel = doc.getSelection?.();
               if (sel && sel.toString().trim()) return;
 
               const width = doc.documentElement.clientWidth;
               const relX = endX / width;
-              // In scroll mode, only handle center tap (no page turn via tap zones)
+              // In scroll mode, any tap toggles chrome
               if (flowModeRef.current === 'scrolled') {
                 onCenterTapRef.current?.();
               } else {
+                // Page-turn zones: left 30%, right 30%, center 40% toggles chrome
                 if (relX < 0.3) rendition.prev();
                 else if (relX > 0.7) rendition.next();
                 else onCenterTapRef.current?.();
               }
             }
           }, { passive: true });
+
+          // Mobile text selection: epubjs 'selected' event may not fire on touch devices.
+          // Detect selections via selectionchange and notify the parent.
+          let selectionTimer: ReturnType<typeof setTimeout> | null = null;
+          let lastSelectedText = '';
+          doc.addEventListener('selectionchange', () => {
+            if (selectionTimer) clearTimeout(selectionTimer);
+            selectionTimer = setTimeout(() => {
+              const sel = doc.getSelection?.();
+              if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+                lastSelectedText = '';
+                return;
+              }
+              const text = sel.toString().trim();
+              // Avoid re-firing for the same selection
+              if (text === lastSelectedText) return;
+              lastSelectedText = text;
+              try {
+                const range = sel.getRangeAt(0);
+                const iframeRect = range.getBoundingClientRect();
+                const iframe = containerRef.current?.querySelector('iframe');
+                const iframeOffset = iframe?.getBoundingClientRect();
+                const adjustedRect = new DOMRect(
+                  iframeRect.x + (iframeOffset?.x || 0),
+                  iframeRect.y + (iframeOffset?.y || 0),
+                  iframeRect.width,
+                  iframeRect.height
+                );
+                // Try to get CFI via epubjs contents
+                let cfi = '';
+                try {
+                  cfi = contents.cfiFromRange(range);
+                } catch {
+                  // CFI generation can fail
+                }
+                onTextSelectedRef.current?.(cfi, text, adjustedRect);
+              } catch {
+                // Non-critical
+              }
+            }, 400); // Wait for selection to stabilize
+          });
 
           // Desktop: click handler (skipped when touch already handled)
           doc.addEventListener('click', (e: MouseEvent) => {
@@ -295,7 +407,6 @@ export function EpubReader({
 
             const width = doc.documentElement.clientWidth;
             const relX = e.clientX / width;
-            // In scroll mode, only handle center tap
             if (flowModeRef.current === 'scrolled') {
               onCenterTapRef.current?.();
             } else {
@@ -306,8 +417,7 @@ export function EpubReader({
           });
         });
 
-        // 6. Determine display target — avoids double display()
-        // Prefer last known CFI (e.g. when switching flow modes) over initialCfi
+        // 7. Determine display target
         let displayTarget: string | undefined = lastCfiRef.current || initialCfi;
 
         if (!displayTarget) {
@@ -329,22 +439,22 @@ export function EpubReader({
           }
         }
 
-        // 7. Single display() call with the resolved target
+        // 8. Single display() call with the resolved target
         await rendition.display(displayTarget);
 
         if (cancelled) return;
 
-        // 8. Report ready + hide loading before background work
+        // 9. Report ready + hide loading before background work
         const totalChapters = book.spine?.items?.length ?? 0;
         onReadyRef.current?.(totalChapters);
         setLoading(false);
 
-        // 9. Defer location generation so it doesn't compete with initial render
+        // 10. Defer location generation so it doesn't compete with initial render
         deferTimer = setTimeout(() => {
           book?.locations.generate(1024).catch(() => {});
         }, 1500);
 
-        // 10. Extract chapters in background if not already stored
+        // 11. Extract chapters in background if not already stored
         getChapters(bookId).then((existing) => {
           if (existing.length === 0) {
             import('@/lib/gutenberg/parser').then(async ({ extractChaptersFromEpub }) => {
@@ -403,34 +513,8 @@ export function EpubReader({
     const rendition = internalRenditionRef.current;
     if (!rendition) return;
 
-    const themeStyles = THEME_STYLES[settings.theme];
-    const fontFamily = FONT_MAP[settings.fontFamily];
-
-    const marginPx =
-      settings.margins === 'narrow' ? '8px' : settings.margins === 'wide' ? '40px' : '20px';
-
     try {
-      rendition.themes.default({
-        body: {
-          'font-size': `${settings.fontSize}px !important`,
-          'line-height': `${settings.lineSpacing} !important`,
-          'font-family': `${fontFamily} !important`,
-          'padding-left': `${marginPx} !important`,
-          'padding-right': `${marginPx} !important`,
-          'padding-top': '0 !important',
-          'padding-bottom': '0 !important',
-          margin: '0 !important',
-          ...themeStyles.body,
-        },
-        'body, p, div, span, li, td, th, blockquote, cite, em, strong, a, h1, h2, h3, h4, h5, h6': {
-          'font-size': `${settings.fontSize}px !important`,
-          'line-height': `${settings.lineSpacing} !important`,
-          'font-family': `${fontFamily} !important`,
-          'text-align': `${settings.textAlign} !important`,
-          ...themeStyles.bodyAll,
-        },
-      });
-      rendition.themes.select('default');
+      applySettingsToRendition(rendition, settings);
     } catch {
       // Theme application can fail during transitions
     }
@@ -471,8 +555,7 @@ export function EpubReader({
         );
         appliedHighlightsRef.current.add(h.id);
       } catch {
-        // Highlight application can fail for CFIs on other pages — that's ok,
-        // epubjs will render them when the user navigates to the right page
+        // Highlight application can fail for CFIs on other pages — that's ok
       }
     }
   }, [highlights]);
@@ -505,6 +588,18 @@ export function EpubReader({
         filter: settings.brightness < 1 ? `brightness(${settings.brightness})` : undefined,
       }}
     >
+      {/* TTS active indicator */}
+      {ttsActive && (
+        <div
+          className="absolute inset-0 z-[1] pointer-events-none rounded-sm"
+          style={{
+            boxShadow: `inset 0 0 0 2px ${
+              settings.theme === 'dark' ? 'rgba(96, 165, 250, 0.4)' : 'rgba(59, 130, 246, 0.3)'
+            }`,
+          }}
+        />
+      )}
+
       {/* Loading overlay */}
       {loading && (
         <div
@@ -560,7 +655,7 @@ export function EpubReader({
         </div>
       )}
 
-      {/* EPUB container + tap/swipe overlay */}
+      {/* EPUB container */}
       <div
         ref={containerRef}
         className="w-full h-full"

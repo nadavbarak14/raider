@@ -3,7 +3,8 @@ export type QuestionType =
   | 'who_is_this'
   | 'explain'
   | 'recap'
-  | 'general';
+  | 'general'
+  | 'define';
 
 export interface Message {
   id: string;

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Book } from '@/types/book';
@@ -8,7 +9,7 @@ import { isBookSaved } from '@/lib/storage/books';
 
 interface BookCardProps {
   book: Book;
-  onSelect: (book: Book) => void;
+  onSelect?: (book: Book) => void;
 }
 
 // Deterministic gradient from book ID for fallback covers
@@ -42,8 +43,8 @@ export function BookCard({ book, onSelect }: BookCardProps) {
   const firstLetter = book.title.charAt(0).toUpperCase();
 
   return (
-    <button
-      onClick={() => onSelect(book)}
+    <Link
+      href={`/book/${book.id}`}
       aria-label={`${book.title} by ${book.author}`}
       className={cn(
         'group flex flex-col text-left rounded-lg overflow-hidden',
@@ -93,6 +94,6 @@ export function BookCard({ book, onSelect }: BookCardProps) {
           {book.author}
         </p>
       </div>
-    </button>
+    </Link>
   );
 }

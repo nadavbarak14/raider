@@ -17,7 +17,7 @@ export function useChromeVisibility({ ready, panelsOpen }: UseChromeVisibilityOp
     }
     timerRef.current = setTimeout(() => {
       setVisible(false);
-    }, 4000);
+    }, 6000); // 6s gives users enough time to find and tap a button
   }, []);
 
   useEffect(() => {

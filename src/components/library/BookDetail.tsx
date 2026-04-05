@@ -147,12 +147,10 @@ function BookDetailContent({ book, onClose }: { book: Book; onClose: () => void 
 }
 
 export function BookDetail({ book, open, onClose }: BookDetailProps) {
-  if (!book) return null;
-
   return (
     <Sheet open={open} onOpenChange={(nextOpen) => { if (!nextOpen) onClose(); }}>
       <SheetContent side="bottom" className="max-h-[85dvh] rounded-t-2xl overflow-y-auto px-0 pb-8">
-        <BookDetailContent key={book.id} book={book} onClose={onClose} />
+        {book && <BookDetailContent key={book.id} book={book} onClose={onClose} />}
       </SheetContent>
     </Sheet>
   );
