@@ -1,13 +1,17 @@
 'use client';
 
 import { useState } from 'react';
+import { Clock } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { formatReadingTime } from '@/lib/reader/reading-time';
 
 interface ProgressBarProps {
   percent: number;
   chapterName: string;
   currentChapter: number;
   totalChapters: number;
+  chapterMinutesLeft?: number;
+  bookMinutesLeft?: number;
 }
 
 export function ProgressBar({
@@ -15,6 +19,8 @@ export function ProgressBar({
   chapterName,
   currentChapter,
   totalChapters,
+  chapterMinutesLeft,
+  bookMinutesLeft,
 }: ProgressBarProps) {
   const [expanded, setExpanded] = useState(false);
 
@@ -30,6 +36,20 @@ export function ProgressBar({
             Chapter {currentChapter + 1} of {totalChapters} &middot;{' '}
             {Math.round(percent)}% complete
           </div>
+          {(chapterMinutesLeft != null || bookMinutesLeft != null) && (
+            <div className="mt-1 flex items-center justify-center gap-1 text-muted-foreground/70">
+              <Clock className="size-3" />
+              {chapterMinutesLeft != null && (
+                <span>{formatReadingTime(chapterMinutesLeft)} left in chapter</span>
+              )}
+              {chapterMinutesLeft != null && bookMinutesLeft != null && (
+                <span>&middot;</span>
+              )}
+              {bookMinutesLeft != null && (
+                <span>{formatReadingTime(bookMinutesLeft)} left in book</span>
+              )}
+            </div>
+          )}
         </div>
       )}
 

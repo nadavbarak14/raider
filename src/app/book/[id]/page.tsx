@@ -2,13 +2,7 @@
 
 import { useEffect, useState, useCallback, useRef, use, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import {
-  ArrowLeft,
-  Settings,
-  BookmarkIcon,
-  List,
-  BookOpen,
-} from 'lucide-react';
+import { ArrowLeft, BookOpen, BookmarkIcon, Highlighter, Volume2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { EpubReader } from '@/components/reader/EpubReader';
@@ -16,14 +10,18 @@ import { ReaderControls } from '@/components/reader/ReaderControls';
 import { ProgressBar } from '@/components/reader/ProgressBar';
 import { TableOfContents } from '@/components/reader/TableOfContents';
 import { Bookmarks } from '@/components/reader/Bookmarks';
+import { ReaderHeader, getChromeColors } from '@/components/reader/ReaderHeader';
 import { HighlightMenu } from '@/components/ai/HighlightMenu';
+import { HighlightsPanel } from '@/components/reader/HighlightsPanel';
+import { DictionaryPopup } from '@/components/reader/DictionaryPopup';
+import { TTSControls } from '@/components/reader/TTSControls';
 import { ThreadPanel } from '@/components/ai/ThreadPanel';
 import { MarginMarkers } from '@/components/ai/MarginMarkers';
 import { GeneralChat } from '@/components/ai/GeneralChat';
-import type { Book, ReadingProgress } from '@/types/book';
+import { useChromeVisibility } from '@/hooks/useChromeVisibility';
+import { useHighlightInteraction } from '@/hooks/useHighlightInteraction';
+import type { Book, ReadingProgress, Highlight, HighlightColor } from '@/types/book';
 import type { ReaderSettings } from '@/types/settings';
-import type { QuestionType } from '@/types/thread';
-import type { Thread } from '@/types/thread';
 import { DEFAULT_READER_SETTINGS } from '@/types/settings';
 import {
   getBook as getStoredBook,
@@ -32,8 +30,12 @@ import {
 import { getBook as fetchBookMeta } from '@/lib/gutenberg/client';
 import { getProgress, saveProgress } from '@/lib/storage/progress';
 import { getSettings, updateReaderSettings } from '@/lib/storage/settings';
-import { getThreadsForBook } from '@/lib/storage/threads';
 import { isLocationBookmarked, toggleBookmark } from '@/lib/reader/bookmarks';
+import { createHighlight, getHighlightsForBook } from '@/lib/reader/highlights';
+import { createReadingSpeedTracker } from '@/lib/reader/reading-speed';
+import { getReadingTimeEstimates } from '@/lib/reader/reading-time';
+import { startSession, endSession } from '@/lib/reader/sessions';
+import { createTTSEngine, type TTSEngine } from '@/lib/reader/tts';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -67,27 +69,51 @@ export default function ReaderPage({
   const [totalChapters, setTotalChapters] = useState(0);
 
   // UI toggles
-  const [chromeVisible, setChromeVisible] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [tocOpen, setTocOpen] = useState(false);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  const [highlightsPanelOpen, setHighlightsPanelOpen] = useState(false);
   const [isBookmarked, setIsBookmarked] = useState(false);
 
-  // AI interaction state
-  const [highlightMenuVisible, setHighlightMenuVisible] = useState(false);
-  const [highlightMenuPosition, setHighlightMenuPosition] = useState({ x: 0, y: 0 });
-  const [selectedText, setSelectedText] = useState('');
-  const [selectedCfi, setSelectedCfi] = useState('');
-  const [threadPanelOpen, setThreadPanelOpen] = useState(false);
-  const [threadSessionKey, setThreadSessionKey] = useState(0);
-  const [activeQuestionType, setActiveQuestionType] = useState<QuestionType>('ask_ai');
-  const [activeAnchorText, setActiveAnchorText] = useState<string | undefined>(undefined);
-  const [activeAnchorCfi, setActiveAnchorCfi] = useState<string | undefined>(undefined);
-  const [activeThreadId, setActiveThreadId] = useState<string | undefined>(undefined);
-  const [bookThreads, setBookThreads] = useState<Thread[]>([]);
+  // Highlights
+  const [highlights, setHighlights] = useState<Highlight[]>([]);
+
+  // Dictionary
+  const [dictionaryVisible, setDictionaryVisible] = useState(false);
+  const [dictionaryWord, setDictionaryWord] = useState('');
+  const [dictionaryPosition, setDictionaryPosition] = useState({ x: 0, y: 0 });
+
+  // Reading time estimates
+  const speedTrackerRef = useRef(createReadingSpeedTracker());
+  const [chapterMinutesLeft, setChapterMinutesLeft] = useState<number | undefined>(undefined);
+  const [bookMinutesLeft, setBookMinutesLeft] = useState<number | undefined>(undefined);
+
+  // Session tracking
+  const sessionIdRef = useRef<string | null>(null);
+  const pagesReadRef = useRef(0);
+
+  // TTS
+  const ttsEngineRef = useRef<TTSEngine | null>(null);
+  const [ttsActive, setTtsActive] = useState(false);
+  const [ttsSupported, setTtsSupported] = useState(false);
+  const getVisibleTextRef = useRef<(() => string) | null>(null);
+
+  // Check TTS support on client only (avoids hydration mismatch)
+  useEffect(() => {
+    setTtsSupported('speechSynthesis' in window);
+  }, []);
 
   // TOC entries
   const [tocEntries, setTocEntries] = useState<TocEntry[]>([]);
+
+  // ── Hooks ────────────────────────────────────────────────────────────────
+
+  const highlight = useHighlightInteraction(bookId);
+
+  const chrome = useChromeVisibility({
+    ready,
+    panelsOpen: [settingsOpen, tocOpen, bookmarksOpen, highlightsPanelOpen, highlight.threadPanelOpen],
+  });
 
   // Derive chapter name from tocEntries + currentChapter
   const currentChapterName = useMemo(() => {
@@ -100,9 +126,6 @@ export default function ReaderPage({
   // Rendition ref for external navigation
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const renditionRef = useRef<any>(null);
-
-  // Hide chrome timer
-  const chromeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Initialize: load book metadata, settings, and progress ───────────────
 
@@ -139,11 +162,17 @@ export default function ReaderPage({
         setTotalChapters(progress.totalChapters);
       }
 
+      // Start reading speed tracker and session
+      speedTrackerRef.current.startSession();
+      const sid = await startSession(bookId);
+      if (!cancelled) sessionIdRef.current = sid;
+
+      // Load highlights for this book
+      const loadedHighlights = await getHighlightsForBook(bookId);
+      if (!cancelled) setHighlights(loadedHighlights);
+
       // Load existing AI threads for this book
-      const threads = await getThreadsForBook(bookId);
-      if (!cancelled) {
-        setBookThreads(threads);
-      }
+      await highlight.refreshThreads();
 
       if (!cancelled) {
         setPageReady(true);
@@ -153,30 +182,13 @@ export default function ReaderPage({
     init();
     return () => {
       cancelled = true;
-    };
-  }, [bookId]);
-
-  // ── Auto-hide chrome after a delay ────────────────────────────────────────
-
-  const scheduleChromeHide = useCallback(() => {
-    if (chromeTimerRef.current) {
-      clearTimeout(chromeTimerRef.current);
-    }
-    chromeTimerRef.current = setTimeout(() => {
-      setChromeVisible(false);
-    }, 4000);
-  }, []);
-
-  useEffect(() => {
-    if (chromeVisible && ready && !settingsOpen && !tocOpen && !bookmarksOpen && !threadPanelOpen) {
-      scheduleChromeHide();
-    }
-    return () => {
-      if (chromeTimerRef.current) {
-        clearTimeout(chromeTimerRef.current);
+      // End reading session on unmount
+      if (sessionIdRef.current) {
+        endSession(sessionIdRef.current, 0, pagesReadRef.current);
       }
     };
-  }, [chromeVisible, ready, settingsOpen, tocOpen, bookmarksOpen, threadPanelOpen, scheduleChromeHide]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bookId]);
 
   // ── Callbacks ─────────────────────────────────────────────────────────────
 
@@ -185,6 +197,10 @@ export default function ReaderPage({
       setCurrentCfi(cfi);
       setCurrentChapter(chapterIndex);
       setPercent(pct);
+
+      // Track reading speed and pages (estimate ~250 words per page turn)
+      speedTrackerRef.current.recordPageTurn(250);
+      pagesReadRef.current += 1;
 
       // Persist reading progress
       const progress: ReadingProgress = {
@@ -201,6 +217,12 @@ export default function ReaderPage({
       // Check bookmark status
       const bookmarked = await isLocationBookmarked(bookId, cfi);
       setIsBookmarked(bookmarked);
+
+      // Update reading time estimates
+      const wpm = speedTrackerRef.current.getWPM();
+      const estimates = await getReadingTimeEstimates(bookId, chapterIndex, pct, wpm);
+      setChapterMinutesLeft(estimates.chapterMinutesLeft);
+      setBookMinutesLeft(estimates.bookMinutesLeft);
     },
     [bookId, totalChapters]
   );
@@ -211,7 +233,6 @@ export default function ReaderPage({
       setReady(true);
 
       // Extract TOC entries from the epub book via rendition
-      // We do this after the book is ready
       const rendition = renditionRef.current;
       if (rendition?.book) {
         rendition.book.loaded.navigation.then(
@@ -230,58 +251,6 @@ export default function ReaderPage({
     },
     []
   );
-
-  const handleTextSelected = useCallback(
-    (cfi: string, text: string, rect: DOMRect) => {
-      if (!text.trim()) return;
-      setSelectedText(text.trim());
-      setSelectedCfi(cfi);
-      // Position the menu at the top-center of the selection
-      setHighlightMenuPosition({
-        x: rect.left + rect.width / 2,
-        y: rect.top,
-      });
-      setHighlightMenuVisible(true);
-    },
-    []
-  );
-
-  const handleHighlightAction = useCallback(
-    (type: QuestionType) => {
-      setHighlightMenuVisible(false);
-      setActiveQuestionType(type);
-      setActiveAnchorText(selectedText);
-      setActiveAnchorCfi(selectedCfi);
-      setActiveThreadId(undefined);
-      setThreadSessionKey((k) => k + 1);
-      setThreadPanelOpen(true);
-    },
-    [selectedText, selectedCfi]
-  );
-
-  const handleCloseThreadPanel = useCallback(() => {
-    setThreadPanelOpen(false);
-    // Refresh threads list when closing panel (new thread may have been created)
-    getThreadsForBook(bookId).then(setBookThreads);
-  }, [bookId]);
-
-  const handleOpenGeneralChat = useCallback(() => {
-    setActiveQuestionType('general');
-    setActiveAnchorText(undefined);
-    setActiveAnchorCfi(undefined);
-    setActiveThreadId(undefined);
-    setThreadSessionKey((k) => k + 1);
-    setThreadPanelOpen(true);
-  }, []);
-
-  const handleOpenThread = useCallback((thread: Thread) => {
-    setActiveQuestionType(thread.isGeneral ? 'general' : 'ask_ai');
-    setActiveAnchorText(thread.anchorText ?? undefined);
-    setActiveAnchorCfi(thread.anchorCfi ?? undefined);
-    setActiveThreadId(thread.id);
-    setThreadSessionKey((k) => k + 1);
-    setThreadPanelOpen(true);
-  }, []);
 
   const handleSettingsChange = useCallback(
     async (newSettings: ReaderSettings) => {
@@ -311,12 +280,93 @@ export default function ReaderPage({
     setIsBookmarked(nowBookmarked);
   }, [bookId, currentCfi, currentChapter]);
 
-  const handleCenterTap = useCallback(() => {
-    // Only toggle when no sheets or panels are open
-    if (!settingsOpen && !tocOpen && !bookmarksOpen && !threadPanelOpen && !highlightMenuVisible) {
-      setChromeVisible((prev) => !prev);
+  // Route text selection: single word -> dictionary, multi-word -> highlight menu
+  const handleTextSelected = useCallback(
+    (cfi: string, text: string, rect: DOMRect) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+
+      const isSingleWord = trimmed.split(/\s+/).length === 1;
+      if (isSingleWord) {
+        setDictionaryWord(trimmed);
+        setDictionaryPosition({ x: rect.left + rect.width / 2, y: rect.top });
+        setDictionaryVisible(true);
+      } else {
+        highlight.handleTextSelected(cfi, text, rect);
+      }
+    },
+    [highlight]
+  );
+
+  const handleHighlightColor = useCallback(
+    async (color: HighlightColor) => {
+      if (!highlight.selectedCfi || !highlight.selectedText) return;
+      await createHighlight(
+        bookId,
+        highlight.selectedCfi,
+        highlight.selectedText,
+        color,
+        currentChapter
+      );
+      highlight.dismissHighlightMenu();
+      // Refresh highlights list
+      const updated = await getHighlightsForBook(bookId);
+      setHighlights(updated);
+    },
+    [bookId, currentChapter, highlight]
+  );
+
+  const handleHighlightNavigate = useCallback((cfiRange: string) => {
+    const rendition = renditionRef.current;
+    if (rendition) {
+      rendition.display(cfiRange);
     }
-  }, [settingsOpen, tocOpen, bookmarksOpen, threadPanelOpen, highlightMenuVisible]);
+  }, []);
+
+  const handleTTSToggle = useCallback(() => {
+    if (ttsActive) {
+      ttsEngineRef.current?.stop();
+      setTtsActive(false);
+      return;
+    }
+
+    // Create engine if needed
+    if (!ttsEngineRef.current) {
+      ttsEngineRef.current = createTTSEngine();
+    }
+    const engine = ttsEngineRef.current;
+    if (!engine.isSupported) return;
+
+    // Set up auto-advance: when TTS finishes the page, go to next page
+    engine.onEnd = () => {
+      const rendition = renditionRef.current;
+      if (!rendition) return;
+      rendition.next().then(() => {
+        // After page turn, wait a beat for content to load, then read new page
+        setTimeout(() => {
+          const text = getVisibleTextRef.current?.();
+          if (text) engine.speak(text);
+        }, 500);
+      });
+    };
+
+    // Start speaking current page
+    const text = getVisibleTextRef.current?.();
+    if (text) {
+      engine.speak(text);
+      setTtsActive(true);
+    }
+  }, [ttsActive]);
+
+  const handleTTSStop = useCallback(() => {
+    setTtsActive(false);
+  }, []);
+
+  const handleCenterTap = useCallback(() => {
+    if (!settingsOpen && !tocOpen && !bookmarksOpen && !highlight.threadPanelOpen && !highlight.highlightMenuVisible) {
+      chrome.toggle();
+    }
+  }, [settingsOpen, tocOpen, bookmarksOpen, highlight.threadPanelOpen, highlight.highlightMenuVisible, chrome]);
 
   // ── Guard: if page data isn't ready, show a loader ────────────────────────
 
@@ -347,97 +397,24 @@ export default function ReaderPage({
     );
   }
 
-  // ── Theme-aware colors for the chrome ──────────────────────────────────────
-
-  const chromeBg =
-    settings.theme === 'dark'
-      ? 'bg-[#1a1a1a]/95'
-      : settings.theme === 'sepia'
-        ? 'bg-[#F5E6C8]/95'
-        : 'bg-white/95';
-
-  const chromeText =
-    settings.theme === 'dark'
-      ? 'text-[#e0e0e0]'
-      : settings.theme === 'sepia'
-        ? 'text-[#5B4636]'
-        : 'text-[#1a1a1a]';
-
-  const chromeBorder =
-    settings.theme === 'dark'
-      ? 'border-white/10'
-      : settings.theme === 'sepia'
-        ? 'border-[#d4c4a8]'
-        : 'border-black/5';
+  const { bg: chromeBg, text: chromeText, border: chromeBorder } = getChromeColors(settings.theme);
 
   return (
     <div className="fixed inset-0 flex flex-col overflow-hidden">
       {/* ── Header ────────────────────────────────────────────────────────── */}
-      <header
-        className={cn(
-          'absolute top-0 left-0 right-0 z-20',
-          'flex items-center gap-1 px-2 h-12',
-          'backdrop-blur-md border-b transition-all duration-300',
-          chromeBg,
-          chromeText,
-          chromeBorder,
-          chromeVisible
-            ? 'translate-y-0 opacity-100'
-            : '-translate-y-full opacity-0 pointer-events-none'
-        )}
-      >
-        {/* Back */}
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => router.push('/')}
-          aria-label="Back to library"
-          className={cn('shrink-0', chromeText)}
-        >
-          <ArrowLeft className="size-5" />
-        </Button>
-
-        {/* Title */}
-        <div className="flex-1 min-w-0 px-1">
-          <h1 className="text-sm font-medium truncate">{book.title}</h1>
-          <p className="text-xs opacity-60 truncate">{book.author}</p>
-        </div>
-
-        {/* TOC */}
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => setTocOpen(true)}
-          aria-label="Table of contents"
-          className={cn('shrink-0', chromeText)}
-        >
-          <List className="size-5" />
-        </Button>
-
-        {/* Bookmark */}
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={handleToggleBookmark}
-          aria-label={isBookmarked ? 'Remove bookmark' : 'Add bookmark'}
-          className={cn('shrink-0', chromeText)}
-        >
-          <BookmarkIcon
-            className={cn('size-5', isBookmarked && 'fill-current')}
-          />
-        </Button>
-
-        {/* Settings */}
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => setSettingsOpen(true)}
-          aria-label="Reading settings"
-          className={cn('shrink-0', chromeText)}
-        >
-          <Settings className="size-5" />
-        </Button>
-      </header>
+      <ReaderHeader
+        book={book}
+        theme={settings.theme}
+        chromeVisible={chrome.visible}
+        isBookmarked={isBookmarked}
+        ttsActive={ttsActive}
+        ttsSupported={ttsSupported}
+        onBack={() => router.push('/')}
+        onTocOpen={() => setTocOpen(true)}
+        onBookmarkToggle={handleToggleBookmark}
+        onSettingsOpen={() => setSettingsOpen(true)}
+        onTTSToggle={handleTTSToggle}
+      />
 
       {/* ── EPUB Reader ───────────────────────────────────────────────────── */}
       <main className="flex-1 min-h-0">
@@ -445,11 +422,13 @@ export default function ReaderPage({
           bookId={bookId}
           initialCfi={initialCfi}
           settings={settings}
+          highlights={highlights}
           onLocationChanged={handleLocationChanged}
           onTextSelected={handleTextSelected}
           onReady={handleReady}
           onCenterTap={handleCenterTap}
           renditionRef={renditionRef}
+          onGetVisibleText={getVisibleTextRef}
         />
       </main>
 
@@ -460,7 +439,7 @@ export default function ReaderPage({
           'transition-all duration-300',
           chromeBg,
           chromeText,
-          chromeVisible
+          chrome.visible
             ? 'translate-y-0 opacity-100'
             : 'translate-y-full opacity-0 pointer-events-none'
         )}
@@ -470,6 +449,8 @@ export default function ReaderPage({
           chapterName={currentChapterName}
           currentChapter={currentChapter}
           totalChapters={totalChapters || 1}
+          chapterMinutesLeft={chapterMinutesLeft}
+          bookMinutesLeft={bookMinutesLeft}
         />
       </div>
 
@@ -498,67 +479,101 @@ export default function ReaderPage({
         onClose={() => setBookmarksOpen(false)}
       />
 
-      {/* ── Bookmark list button (long-press accessible) ──────────────────── */}
-      {/* This is a separate button to open the bookmarks list sheet */}
-      {chromeVisible && (
-        <button
-          type="button"
-          onClick={() => setBookmarksOpen(true)}
-          className={cn(
-            'fixed bottom-14 right-3 z-20',
-            'w-10 h-10 rounded-full flex items-center justify-center',
-            'backdrop-blur-md border shadow-sm transition-all duration-300',
-            'touch-manipulation',
-            chromeBg,
-            chromeText,
-            chromeBorder
-          )}
-          aria-label="View all bookmarks"
-        >
-          <BookmarkIcon className="size-4" />
-        </button>
+      <HighlightsPanel
+        bookId={bookId}
+        onNavigate={handleHighlightNavigate}
+        open={highlightsPanelOpen}
+        onClose={() => setHighlightsPanelOpen(false)}
+      />
+
+      {/* ── Floating action buttons ──────────────────────────────────────── */}
+      {chrome.visible && (
+        <div className="fixed bottom-14 right-3 z-20 flex flex-col gap-2">
+          <button
+            type="button"
+            onClick={() => setHighlightsPanelOpen(true)}
+            className={cn(
+              'w-10 h-10 rounded-full flex items-center justify-center',
+              'backdrop-blur-md border shadow-sm transition-all duration-300',
+              'touch-manipulation',
+              chromeBg,
+              chromeText,
+              chromeBorder
+            )}
+            aria-label="View all highlights"
+          >
+            <Highlighter className="size-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setBookmarksOpen(true)}
+            className={cn(
+              'w-10 h-10 rounded-full flex items-center justify-center',
+              'backdrop-blur-md border shadow-sm transition-all duration-300',
+              'touch-manipulation',
+              chromeBg,
+              chromeText,
+              chromeBorder
+            )}
+            aria-label="View all bookmarks"
+          >
+            <BookmarkIcon className="size-4" />
+          </button>
+        </div>
       )}
 
       {/* ── AI Components ──────────────────────────────────────────────── */}
 
-      {/* Highlight menu — appears on text selection */}
-      <HighlightMenu
-        position={highlightMenuPosition}
-        selectedText={selectedText}
-        selectedCfi={selectedCfi}
-        onAction={handleHighlightAction}
-        onClose={() => setHighlightMenuVisible(false)}
-        visible={highlightMenuVisible}
+      <DictionaryPopup
+        word={dictionaryWord}
+        position={dictionaryPosition}
+        visible={dictionaryVisible}
+        onClose={() => setDictionaryVisible(false)}
       />
 
-      {/* Thread panel — conversation view (key forces remount on each session) */}
-      {threadPanelOpen && (
+      <HighlightMenu
+        position={highlight.highlightMenuPosition}
+        selectedText={highlight.selectedText}
+        selectedCfi={highlight.selectedCfi}
+        onAction={highlight.handleHighlightAction}
+        onHighlight={handleHighlightColor}
+        onClose={highlight.dismissHighlightMenu}
+        visible={highlight.highlightMenuVisible}
+      />
+
+      {highlight.threadPanelOpen && (
         <ThreadPanel
-          key={threadSessionKey}
+          key={highlight.threadSessionKey}
           bookId={bookId}
           currentChapterIndex={currentChapter}
-          anchorCfi={activeAnchorCfi}
-          anchorText={activeAnchorText}
-          questionType={activeQuestionType}
-          threadId={activeThreadId}
-          open={threadPanelOpen}
-          onClose={handleCloseThreadPanel}
+          anchorCfi={highlight.activeAnchorCfi}
+          anchorText={highlight.activeAnchorText}
+          questionType={highlight.activeQuestionType}
+          threadId={highlight.activeThreadId}
+          open={highlight.threadPanelOpen}
+          onClose={highlight.handleCloseThreadPanel}
         />
       )}
 
-      {/* Margin markers — thread count badge */}
       <MarginMarkers
-        threads={bookThreads}
-        onOpenThread={handleOpenThread}
-        visible={chromeVisible && !threadPanelOpen}
+        threads={highlight.bookThreads}
+        onOpenThread={highlight.handleOpenThread}
+        visible={chrome.visible && !highlight.threadPanelOpen}
       />
 
-      {/* General chat FAB */}
-      {chromeVisible && !threadPanelOpen && (
+      {chrome.visible && !highlight.threadPanelOpen && (
         <GeneralChat
           bookId={bookId}
           currentChapterIndex={currentChapter}
-          onOpen={handleOpenGeneralChat}
+          onOpen={highlight.handleOpenGeneralChat}
+        />
+      )}
+
+      {/* TTS Controls */}
+      {ttsActive && ttsEngineRef.current && (
+        <TTSControls
+          engine={ttsEngineRef.current}
+          onStop={handleTTSStop}
         />
       )}
     </div>

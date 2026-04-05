@@ -37,6 +37,9 @@ export async function deleteBook(id: string): Promise<void> {
       db.messages,
       db.bookBlobs,
       db.cachedMetadata,
+      db.highlights,
+      db.collectionBooks,
+      db.readingSessions,
     ],
     async () => {
       // Gather thread IDs so we can delete messages too
@@ -53,6 +56,9 @@ export async function deleteBook(id: string): Promise<void> {
         db.messages.where('threadId').anyOf(threadIds).delete(),
         db.bookBlobs.delete(id),
         db.cachedMetadata.delete(id),
+        db.highlights.where('bookId').equals(id).delete(),
+        db.collectionBooks.where('bookId').equals(id).delete(),
+        db.readingSessions.where('bookId').equals(id).delete(),
       ]);
     }
   );

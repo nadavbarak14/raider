@@ -2,9 +2,9 @@
 
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import Link from 'next/link';
-import { BookOpen, Loader2, ChevronRight } from 'lucide-react';
+import { BookOpen, Loader2, ChevronRight, Library } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import type { Book } from '@/types/book';
+import type { Book, Collection } from '@/types/book';
 import type { ReadingProgress } from '@/types/book';
 import { seedCatalog, categoryMap } from '@/lib/gutenberg/seed-catalog';
 import { searchBooks, getBooksPage } from '@/lib/gutenberg/client';
@@ -15,6 +15,14 @@ import { SearchBar } from '@/components/library/SearchBar';
 import { CategoryNav } from '@/components/library/CategoryNav';
 import { BookGrid } from '@/components/library/BookGrid';
 import { BookDetail } from '@/components/library/BookDetail';
+import { CollectionCard } from '@/components/library/CollectionCard';
+import {
+  seedDefaultCollections,
+  syncSystemCollections,
+  getAllCollections,
+  getBooksInCollection,
+} from '@/lib/storage/collections';
+import { getSettings, saveSettings } from '@/lib/storage/settings';
 
 const ALL_CATEGORIES = ['All', ...Object.keys(categoryMap)];
 
@@ -156,6 +164,9 @@ export default function LibraryHome() {
   // Continue Reading state
   const [continueItems, setContinueItems] = useState<ContinueReadingItem[]>([]);
 
+  // Collections state
+  const [collections, setCollections] = useState<Array<{ collection: Collection; bookCount: number }>>([]);
+
   // Load More state
   const [extraBooks, setExtraBooks] = useState<Book[]>([]);
   const [loadMorePage, setLoadMorePage] = useState(1);
@@ -205,6 +216,32 @@ export default function LibraryHome() {
     }
 
     loadContinueReading();
+
+    // Seed and load collections
+    async function loadCollections() {
+      try {
+        const appSettings = await getSettings();
+        if (!appSettings.collectionsSeeded) {
+          await seedDefaultCollections();
+          await saveSettings({ ...appSettings, collectionsSeeded: true });
+        }
+        // Auto-populate system collections based on reading progress
+        await syncSystemCollections();
+
+        const allCollections = await getAllCollections();
+        const withCounts = await Promise.all(
+          allCollections.map(async (c) => ({
+            collection: c,
+            bookCount: (await getBooksInCollection(c.id)).length,
+          }))
+        );
+        if (!cancelled) setCollections(withCounts);
+      } catch {
+        // Collections are non-critical
+      }
+    }
+    loadCollections();
+
     return () => {
       cancelled = true;
     };
@@ -326,6 +363,29 @@ export default function LibraryHome() {
         {/* Continue Reading — only when not searching and items exist */}
         {!isSearchMode && continueItems.length > 0 && (
           <ContinueReadingSection items={continueItems} />
+        )}
+
+        {/* Collections */}
+        {!isSearchMode && collections.length > 0 && (
+          <section className="px-4 pb-4" aria-label="Collections">
+            <h2 className="flex items-center gap-2 text-sm font-semibold mb-3">
+              <Library className="size-4 text-muted-foreground" />
+              Collections
+            </h2>
+            <div className="flex gap-2 overflow-x-auto pb-2 snap-x snap-mandatory scrollbar-hide">
+              {collections.map(({ collection, bookCount }) => (
+                <CollectionCard
+                  key={collection.id}
+                  name={collection.name}
+                  bookCount={bookCount}
+                  isSystem={collection.isSystem}
+                  onClick={() => {
+                    // TODO: open collection view in future iteration
+                  }}
+                />
+              ))}
+            </div>
+          </section>
         )}
 
         {/* Search mode feedback */}

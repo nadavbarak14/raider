@@ -1,5 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie';
-import type { Book, Chapter, ReadingProgress, Bookmark } from '@/types/book';
+import type { Book, Chapter, ReadingProgress, Bookmark, Highlight, Collection, CollectionBook, ReadingSession } from '@/types/book';
 import type { Thread, Message } from '@/types/thread';
 import type { AppSettings } from '@/types/settings';
 
@@ -50,6 +50,10 @@ export class AppDatabase extends Dexie {
   settings!: EntityTable<StoredSettings, 'id'>;
   bookBlobs!: EntityTable<BookBlob, 'bookId'>;
   cachedMetadata!: EntityTable<CachedMetadata, 'id'>;
+  highlights!: EntityTable<Highlight, 'id'>;
+  collections!: EntityTable<Collection, 'id'>;
+  collectionBooks!: EntityTable<CollectionBook, 'id'>;
+  readingSessions!: EntityTable<ReadingSession, 'id'>;
 
   constructor() {
     super('ai-book-companion');
@@ -65,6 +69,24 @@ export class AppDatabase extends Dexie {
       settings: 'id',
       bookBlobs: 'bookId',
       cachedMetadata: 'id, cachedAt',
+    });
+
+    this.version(2).stores({
+      // Existing tables (must repeat schema for Dexie versioning)
+      books: 'id, title, author, dateAdded',
+      chapters: '++id, bookId, index, [bookId+index]',
+      readingProgress: 'bookId, lastReadAt',
+      bookmarks: 'id, bookId, chapterIndex, createdAt',
+      threads: 'id, bookId, chapterIndexAtCreation, createdAt, updatedAt, isGeneral',
+      messages: 'id, threadId, timestamp',
+      settings: 'id',
+      bookBlobs: 'bookId',
+      cachedMetadata: 'id, cachedAt',
+      // New tables
+      highlights: 'id, bookId, cfiRange, chapterIndex, [bookId+chapterIndex]',
+      collections: 'id, name, createdAt',
+      collectionBooks: '++id, collectionId, bookId, [collectionId+bookId]',
+      readingSessions: 'id, bookId, startedAt',
     });
   }
 }

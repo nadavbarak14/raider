@@ -8,10 +8,20 @@ import {
   type RefObject,
 } from 'react';
 import type { ReaderSettings } from '@/types/settings';
+import type { Highlight } from '@/types/book';
 import { getBookBlob, saveBookBlob, getBook as getStoredBook } from '@/lib/storage/books';
 import { getBook as fetchBookMeta } from '@/lib/gutenberg/client';
 import { saveChapters, getChapters } from '@/lib/storage/books';
 import { Loader2 } from 'lucide-react';
+
+// ── Highlight color map ─────────────────────────────────────────────────────
+
+const HIGHLIGHT_COLOR_MAP: Record<string, string> = {
+  yellow: 'rgba(251, 191, 36, 0.3)',
+  blue: 'rgba(96, 165, 250, 0.3)',
+  green: 'rgba(52, 211, 153, 0.3)',
+  pink: 'rgba(244, 114, 182, 0.3)',
+};
 
 // ── Types for epubjs (we avoid importing at module level) ────────────────────
 
@@ -58,6 +68,7 @@ interface EpubReaderProps {
   bookId: string;
   initialCfi?: string;
   settings: ReaderSettings;
+  highlights?: Highlight[];
   onLocationChanged?: (cfi: string, chapterIndex: number, percent: number) => void;
   onTextSelected?: (cfi: string, selectedText: string, rect: DOMRect) => void;
   onReady?: (totalChapters: number) => void;
@@ -65,23 +76,32 @@ interface EpubReaderProps {
   onCenterTap?: () => void;
   /** Ref exposed so the parent page can call .next() / .prev() / .display() */
   renditionRef?: RefObject<EpubRendition | null>;
+  /** Callback to get the visible page text (for TTS) */
+  onGetVisibleText?: RefObject<(() => string) | null>;
 }
 
 export function EpubReader({
   bookId,
   initialCfi,
   settings,
+  highlights = [],
   onLocationChanged,
   onTextSelected,
   onReady,
   onCenterTap,
   renditionRef,
+  onGetVisibleText,
 }: EpubReaderProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const bookRef = useRef<EpubBook | null>(null);
   const internalRenditionRef = useRef<EpubRendition | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const isRenditionReady = useRef(false);
+  const appliedHighlightsRef = useRef<Set<string>>(new Set());
+  const lastCfiRef = useRef<string | undefined>(undefined);
+  const flowModeRef = useRef(settings.flowMode);
+  flowModeRef.current = settings.flowMode;
 
   // Stable callback refs so we don't re-run the effect when callbacks change
   const onLocationChangedRef = useRef(onLocationChanged);
@@ -150,12 +170,13 @@ export function EpubReader({
         if (cancelled) return;
 
         // 3. Create rendition
+        const isScrolled = settings.flowMode === 'scrolled';
         rendition = book.renderTo(containerRef.current, {
           width: '100%',
           height: '100%',
-          flow: 'paginated',
+          flow: isScrolled ? 'scrolled-doc' : 'paginated',
           spread: 'none',
-          snap: true,
+          snap: !isScrolled,
         });
 
         internalRenditionRef.current = rendition;
@@ -163,8 +184,22 @@ export function EpubReader({
           (renditionRef as React.MutableRefObject<EpubRendition | null>).current = rendition;
         }
 
+        // Expose getVisibleText for TTS
+        if (onGetVisibleText) {
+          (onGetVisibleText as React.MutableRefObject<(() => string) | null>).current = () => {
+            try {
+              const iframe = containerRef.current?.querySelector('iframe');
+              if (!iframe?.contentDocument?.body) return '';
+              return iframe.contentDocument.body.textContent?.trim() || '';
+            } catch {
+              return '';
+            }
+          };
+        }
+
         // 4. Determine display target BEFORE rendering — avoids double display()
-        let displayTarget: string | undefined = initialCfi;
+        // Prefer last known CFI (e.g. when switching flow modes) over initialCfi
+        let displayTarget: string | undefined = lastCfiRef.current || initialCfi;
 
         if (!displayTarget) {
           try {
@@ -194,7 +229,9 @@ export function EpubReader({
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         rendition.on('relocated', (location: any) => {
           if (!location?.start) return;
+          isRenditionReady.current = true;
           const cfi = location.start.cfi || '';
+          lastCfiRef.current = cfi;
           const percent = location.start.percentage != null
             ? Math.round(location.start.percentage * 100)
             : 0;
@@ -263,9 +300,14 @@ export function EpubReader({
 
               const width = doc.documentElement.clientWidth;
               const relX = endX / width;
-              if (relX < 0.3) rendition.prev();
-              else if (relX > 0.7) rendition.next();
-              else onCenterTapRef.current?.();
+              // In scroll mode, only handle center tap (no page turn via tap zones)
+              if (flowModeRef.current === 'scrolled') {
+                onCenterTapRef.current?.();
+              } else {
+                if (relX < 0.3) rendition.prev();
+                else if (relX > 0.7) rendition.next();
+                else onCenterTapRef.current?.();
+              }
             }
           }, { passive: true });
 
@@ -280,9 +322,14 @@ export function EpubReader({
 
             const width = doc.documentElement.clientWidth;
             const relX = e.clientX / width;
-            if (relX < 0.3) rendition.prev();
-            else if (relX > 0.7) rendition.next();
-            else onCenterTapRef.current?.();
+            // In scroll mode, only handle center tap
+            if (flowModeRef.current === 'scrolled') {
+              onCenterTapRef.current?.();
+            } else {
+              if (relX < 0.3) rendition.prev();
+              else if (relX > 0.7) rendition.next();
+              else onCenterTapRef.current?.();
+            }
           });
         });
 
@@ -323,6 +370,8 @@ export function EpubReader({
     return () => {
       cancelled = true;
       if (deferTimer != null) clearTimeout(deferTimer);
+      isRenditionReady.current = false;
+      appliedHighlightsRef.current.clear();
       if (rendition) {
         try {
           rendition.destroy();
@@ -343,9 +392,9 @@ export function EpubReader({
         (renditionRef as React.MutableRefObject<EpubRendition | null>).current = null;
       }
     };
-    // Only re-initialize when bookId changes; settings are applied separately
+    // Re-initialize when bookId or flowMode changes (flowMode requires new rendition)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bookId]);
+  }, [bookId, settings.flowMode]);
 
   // ── Apply settings to rendition ──────────────────────────────────────────
 
@@ -356,13 +405,19 @@ export function EpubReader({
     const themeStyles = THEME_STYLES[settings.theme];
     const fontFamily = FONT_MAP[settings.fontFamily];
 
+    const marginPx =
+      settings.margins === 'narrow' ? '8px' : settings.margins === 'wide' ? '40px' : '20px';
+
     try {
       rendition.themes.default({
         body: {
           'font-size': `${settings.fontSize}px !important`,
           'line-height': `${settings.lineSpacing} !important`,
           'font-family': `${fontFamily} !important`,
-          padding: '0 !important',
+          'padding-left': `${marginPx} !important`,
+          'padding-right': `${marginPx} !important`,
+          'padding-top': '0 !important',
+          'padding-bottom': '0 !important',
           margin: '0 !important',
           ...themeStyles.body,
         },
@@ -370,6 +425,7 @@ export function EpubReader({
           'font-size': `${settings.fontSize}px !important`,
           'line-height': `${settings.lineSpacing} !important`,
           'font-family': `${fontFamily} !important`,
+          'text-align': `${settings.textAlign} !important`,
           ...themeStyles.bodyAll,
         },
       });
@@ -379,12 +435,55 @@ export function EpubReader({
     }
   }, [settings]);
 
+  // ── Apply highlights to rendition ───────────────────────────────────────
+
+  useEffect(() => {
+    const rendition = internalRenditionRef.current;
+    if (!rendition || !isRenditionReady.current) return;
+
+    // Track which highlights are currently applied
+    const currentIds = new Set(highlights.map((h) => h.id));
+
+    // Remove highlights that are no longer in the list
+    for (const id of appliedHighlightsRef.current) {
+      if (!currentIds.has(id)) {
+        try {
+          const h = highlights.find((hl) => hl.id === id);
+          if (h) rendition.annotations.remove(h.cfiRange, 'highlight');
+        } catch {
+          // Removal can fail if the annotation was on a different page
+        }
+        appliedHighlightsRef.current.delete(id);
+      }
+    }
+
+    // Add new highlights
+    for (const h of highlights) {
+      if (appliedHighlightsRef.current.has(h.id)) continue;
+      try {
+        rendition.annotations.highlight(
+          h.cfiRange,
+          {},
+          undefined,
+          `hl-${h.color}`,
+          { fill: HIGHLIGHT_COLOR_MAP[h.color] || HIGHLIGHT_COLOR_MAP.yellow, 'fill-opacity': '0.3', 'mix-blend-mode': 'multiply' }
+        );
+        appliedHighlightsRef.current.add(h.id);
+      } catch {
+        // Highlight application can fail for CFIs on other pages — that's ok,
+        // epubjs will render them when the user navigates to the right page
+      }
+    }
+  }, [highlights]);
+
   // ── Keyboard navigation ──────────────────────────────────────────────────
 
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
       const rendition = internalRenditionRef.current;
       if (!rendition) return;
+      // In scroll mode, let the browser handle arrow keys natively for scrolling
+      if (flowModeRef.current === 'scrolled') return;
       if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
         rendition.prev();
       } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
@@ -400,7 +499,10 @@ export function EpubReader({
   return (
     <div
       className="relative w-full h-full"
-      style={{ backgroundColor: CONTAINER_BG[settings.theme] }}
+      style={{
+        backgroundColor: CONTAINER_BG[settings.theme],
+        filter: settings.brightness < 1 ? `brightness(${settings.brightness})` : undefined,
+      }}
     >
       {/* Loading overlay */}
       {loading && (

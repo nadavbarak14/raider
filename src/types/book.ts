@@ -42,3 +42,41 @@ export interface Bookmark {
   label?: string; // optional user note
   createdAt: number; // Unix timestamp (ms)
 }
+
+export type HighlightColor = 'yellow' | 'blue' | 'green' | 'pink';
+
+export interface Highlight {
+  id: string;
+  bookId: string;
+  cfiRange: string;
+  text: string;
+  color: HighlightColor;
+  note?: string;
+  chapterIndex: number;
+  createdAt: number; // Unix timestamp (ms)
+}
+
+export interface Collection {
+  id: string;
+  name: string;
+  color?: string;
+  isSystem: boolean;
+  createdAt: number; // Unix timestamp (ms)
+  updatedAt: number; // Unix timestamp (ms)
+}
+
+export interface CollectionBook {
+  id?: number; // auto-incremented
+  collectionId: string;
+  bookId: string;
+  addedAt: number; // Unix timestamp (ms)
+}
+
+export interface ReadingSession {
+  id: string;
+  bookId: string;
+  startedAt: number; // Unix timestamp (ms)
+  endedAt: number; // Unix timestamp (ms), 0 if still active
+  wordsRead: number;
+  pagesRead: number;
+}

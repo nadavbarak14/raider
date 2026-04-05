@@ -8,6 +8,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
+import { Sun } from 'lucide-react';
 import type { ReaderSettings } from '@/types/settings';
 
 interface ReaderControlsProps {
@@ -159,6 +160,130 @@ export function ReaderControls({
             </div>
           </div>
 
+          {/* Reading Mode */}
+          <div>
+            <label className="text-sm font-medium block mb-3">Reading Mode</label>
+            <div className="grid grid-cols-2 gap-2">
+              {([
+                { value: 'paginated' as const, label: 'Paginated' },
+                { value: 'scrolled' as const, label: 'Scroll' },
+              ]).map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => update({ flowMode: opt.value })}
+                  className={cn(
+                    'rounded-lg border py-2.5 px-3 text-sm transition-all min-h-[44px]',
+                    'touch-manipulation',
+                    settings.flowMode === opt.value
+                      ? 'border-foreground bg-foreground text-background font-medium'
+                      : 'border-border hover:border-foreground/30 bg-background'
+                  )}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Margins */}
+          <div>
+            <label className="text-sm font-medium block mb-3">Margins</label>
+            <div className="grid grid-cols-3 gap-2">
+              {(['narrow', 'medium', 'wide'] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => update({ margins: m })}
+                  className={cn(
+                    'rounded-lg border py-2.5 px-3 text-sm capitalize transition-all min-h-[44px]',
+                    'touch-manipulation',
+                    settings.margins === m
+                      ? 'border-foreground bg-foreground text-background font-medium'
+                      : 'border-border hover:border-foreground/30 bg-background'
+                  )}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Text Alignment */}
+          <div>
+            <label className="text-sm font-medium block mb-3">Alignment</label>
+            <div className="grid grid-cols-2 gap-2">
+              {([
+                { value: 'left' as const, label: 'Left' },
+                { value: 'justify' as const, label: 'Justified' },
+              ]).map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => update({ textAlign: opt.value })}
+                  className={cn(
+                    'rounded-lg border py-2.5 px-3 text-sm transition-all min-h-[44px]',
+                    'touch-manipulation',
+                    settings.textAlign === opt.value
+                      ? 'border-foreground bg-foreground text-background font-medium'
+                      : 'border-border hover:border-foreground/30 bg-background'
+                  )}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Page Animation */}
+          {settings.flowMode === 'paginated' && (
+            <div>
+              <label className="text-sm font-medium block mb-3">Page Turn</label>
+              <div className="grid grid-cols-3 gap-2">
+                {(['slide', 'fade', 'none'] as const).map((anim) => (
+                  <button
+                    key={anim}
+                    type="button"
+                    onClick={() => update({ pageAnimation: anim })}
+                    className={cn(
+                      'rounded-lg border py-2.5 px-3 text-sm capitalize transition-all min-h-[44px]',
+                      'touch-manipulation',
+                      settings.pageAnimation === anim
+                        ? 'border-foreground bg-foreground text-background font-medium'
+                        : 'border-border hover:border-foreground/30 bg-background'
+                    )}
+                  >
+                    {anim}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Brightness */}
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <label className="text-sm font-medium">Brightness</label>
+              <span className="text-sm tabular-nums text-muted-foreground">
+                {Math.round(settings.brightness * 100)}%
+              </span>
+            </div>
+            <div className="flex items-center gap-3">
+              <Sun className="size-4 text-muted-foreground shrink-0 opacity-40" />
+              <Slider
+                min={0.2}
+                max={1.0}
+                step={0.05}
+                value={[settings.brightness]}
+                onValueChange={(val) => {
+                  const arr = Array.isArray(val) ? val : [val];
+                  update({ brightness: Math.round(arr[0] * 100) / 100 });
+                }}
+              />
+              <Sun className="size-5 text-muted-foreground shrink-0" />
+            </div>
+          </div>
+
           {/* Live preview text */}
           <div
             className="rounded-lg border p-4 transition-all"
@@ -171,6 +296,9 @@ export function ReaderControls({
                     : 'system-ui, sans-serif',
               fontSize: `${settings.fontSize}px`,
               lineHeight: settings.lineSpacing,
+              textAlign: settings.textAlign,
+              paddingLeft: settings.margins === 'narrow' ? '8px' : settings.margins === 'wide' ? '24px' : '16px',
+              paddingRight: settings.margins === 'narrow' ? '8px' : settings.margins === 'wide' ? '24px' : '16px',
               backgroundColor:
                 settings.theme === 'dark'
                   ? '#1a1a1a'
@@ -183,6 +311,7 @@ export function ReaderControls({
                   : settings.theme === 'sepia'
                     ? '#5B4636'
                     : '#1a1a1a',
+              filter: settings.brightness < 1 ? `brightness(${settings.brightness})` : undefined,
             }}
           >
             It was the best of times, it was the worst of times&hellip;

@@ -4,12 +4,21 @@ import { useEffect, useRef } from 'react';
 import { MessageSquare, User, Lightbulb, ListOrdered } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { QuestionType } from '@/types/thread';
+import type { HighlightColor } from '@/types/book';
+
+const HIGHLIGHT_COLORS: { color: HighlightColor; hex: string; label: string }[] = [
+  { color: 'yellow', hex: '#FBBF24', label: 'Yellow highlight' },
+  { color: 'blue', hex: '#60A5FA', label: 'Blue highlight' },
+  { color: 'green', hex: '#34D399', label: 'Green highlight' },
+  { color: 'pink', hex: '#F472B6', label: 'Pink highlight' },
+];
 
 interface HighlightMenuProps {
   position: { x: number; y: number };
   selectedText: string;
   selectedCfi: string;
   onAction: (type: QuestionType) => void;
+  onHighlight?: (color: HighlightColor) => void;
   onClose: () => void;
   visible: boolean;
 }
@@ -24,6 +33,7 @@ const ACTIONS: { type: QuestionType; icon: typeof MessageSquare; label: string }
 export function HighlightMenu({
   position,
   onAction,
+  onHighlight,
   onClose,
   visible,
 }: HighlightMenuProps) {
@@ -112,6 +122,35 @@ export function HighlightMenu({
             : '-top-1.5 border-l border-t'
         )}
       />
+
+      {/* Color highlight buttons */}
+      {onHighlight && (
+        <>
+          <div className="flex items-center gap-1 px-1">
+            {HIGHLIGHT_COLORS.map(({ color, hex, label }) => (
+              <button
+                key={color}
+                type="button"
+                role="menuitem"
+                onClick={() => onHighlight(color)}
+                aria-label={label}
+                className={cn(
+                  'w-7 h-7 rounded-full border-2 border-transparent',
+                  'hover:scale-110 active:scale-95 transition-transform',
+                  'touch-manipulation min-w-[44px] min-h-[44px]',
+                  'flex items-center justify-center'
+                )}
+              >
+                <span
+                  className="w-5 h-5 rounded-full"
+                  style={{ backgroundColor: hex }}
+                />
+              </button>
+            ))}
+          </div>
+          <div className="w-px h-8 bg-border mx-0.5" />
+        </>
+      )}
 
       {ACTIONS.map(({ type, icon: Icon, label }) => (
         <button
